@@ -4,7 +4,7 @@ import li.cil.oc.api.network.Arguments;
 import li.cil.oc.api.network.Callback;
 import li.cil.oc.api.network.Context;
 import li.cil.oc.api.network.SimpleComponent;
-import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.EntityLiving;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.AxisAlignedBB;
 
@@ -54,15 +54,15 @@ public class TileEntitySimpleRadar extends TileEntity implements SimpleComponent
             AxisAlignedBB bounds = AxisAlignedBB.
                     getBoundingBox(xCoord, yCoord, zCoord, xCoord + 1, yCoord + 1, zCoord + 1).
                     expand(RadarRange, RadarRange, RadarRange);
-            for (Object obj : getWorldObj().getEntitiesWithinAABB(EntityLivingBase.class, bounds)) {
-                EntityLivingBase entity = (EntityLivingBase) obj;
+            for (Object obj : getWorldObj().getEntitiesWithinAABB(EntityLiving.class, bounds)) {
+                EntityLiving entity = (EntityLiving) obj;
                 double dx = entity.posX - (xCoord + 0.5);
                 double dz = entity.posZ - (zCoord + 0.5);
                 // Check if the entity is actually in range.
                 if (Math.sqrt(dx * dx + dz * dz) < RadarRange) {
                     // Maps are converted to tables on the Lua side.
                     Map<String, Object> entry = new HashMap<String, Object>();
-                    entry.put("name", entity.getEntityName());
+                    entry.put("name", entity.getCustomNameTag());
                     entry.put("x", (int) dx);
                     entry.put("z", (int) dz);
                     entities.add(entry);

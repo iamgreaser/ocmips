@@ -7,10 +7,10 @@ import net.minecraft.tileentity.TileEntity;
 import net.minecraft.world.World;
 
 public class BlockRadar extends Block {
-    public BlockRadar(int blockId) {
-        super(blockId, Material.anvil);
+    public BlockRadar() {
+        super(Material.anvil);
         setCreativeTab(CreativeTabs.tabAllSearch);
-        setUnlocalizedName("Radar");
+        setBlockName("Radar");
     }
 
     @Override
