@@ -75,7 +75,12 @@ public class TileEntityRadar extends TileEntityEnvironment {
                 if (Math.sqrt(dx * dx + dz * dz) < RadarRange) {
                     // Maps are converted to tables on the Lua side.
                     Map<String, Object> entry = new HashMap<String, Object>();
-                    entry.put("name", entity.getCustomNameTag());
+                    if (entity.hasCustomNameTag()) {
+                        entry.put("name", entity.getCustomNameTag());
+                    }
+                    else {
+                        entry.put("name", entity.getCommandSenderName());
+                    }
                     entry.put("x", (int) dx);
                     entry.put("z", (int) dz);
                     entities.add(entry);
