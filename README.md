@@ -1,6 +1,10 @@
 This is an example mod, demonstrating how to implement a tile entity that can be accessed from programs on an OpenComputers computer connected to the tile entity.
 
-**Important**: you'll need the OpenComputers API in your classpath to compile this example.
+To run it, after cloning the repository, set up your workspace with gradle as usual:
+```
+gradlew setupDecompWorkspace idea
+```
+I recommend enabling the Gradle plugin in IDEA. When opening the project in IDEA with it enabled, it will ask you whether you'd like to import the Gradle project. When you do so, it'll automatically set up the library dependency on the OC API for you.
 
 The example tile entity is a simple entity radar, that returns a list of living entities in the range of the tile entity, providing each entity's name and position. When connected to a computer it can be accessed as a component named "radar":
 ```
