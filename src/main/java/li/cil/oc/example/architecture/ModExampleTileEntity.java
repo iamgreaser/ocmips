@@ -1,4 +1,4 @@
-package li.cil.oc.example.tileentity;
+package li.cil.oc.example.architecture;
 
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
@@ -21,17 +21,8 @@ public class ModExampleTileEntity {
     @Mod.Instance
     public static ModExampleTileEntity instance;
 
-    public static BlockRadar radar;
-    public static BlockSimpleRadar simpleRadar;
-
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent e) {
-        radar = new BlockRadar();
-        GameRegistry.registerBlock(radar, "oc:example_radar");
-        GameRegistry.registerTileEntity(TileEntityRadar.class, "oc:example_radar");
-
-        simpleRadar = new BlockSimpleRadar();
-        GameRegistry.registerBlock(simpleRadar, "oc:example_simple_radar");
-        GameRegistry.registerTileEntity(TileEntitySimpleRadar.class, "oc:example_simple_radar");
+    	li.cil.oc.api.Machine.add(PseudoArchitecture.class);
     }
 }
