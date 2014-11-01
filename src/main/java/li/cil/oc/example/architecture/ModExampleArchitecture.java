@@ -13,13 +13,13 @@ import cpw.mods.fml.common.registry.GameRegistry;
  * specific parts. It is not intended for use or distribution, but you're free
  * to base a proper addon on this code.
  */
-@Mod(modid = "OpenComputers|ExampleTileEntity",
-        name = "OpenComputers Addon Example - TileEntity",
+@Mod(modid = "OpenComputers|ExampleArchitecture",
+        name = "OpenComputers Addon Example - Architecture",
         version = "1.0.0",
-        dependencies = "required-after:OpenComputers@[1.2.0,)")
-public class ModExampleTileEntity {
+        dependencies = "required-after:OpenComputers@[1.4.0,)")
+public class ModExampleArchitecture {
     @Mod.Instance
-    public static ModExampleTileEntity instance;
+    public static ModExampleArchitecture instance;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent e) {
