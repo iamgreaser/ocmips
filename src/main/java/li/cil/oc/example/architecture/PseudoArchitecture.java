@@ -1,5 +1,6 @@
 package li.cil.oc.example.architecture;
 
+import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import li.cil.oc.api.machine.Architecture;
 import li.cil.oc.api.machine.Callback;
@@ -24,7 +25,7 @@ public class PseudoArchitecture implements Architecture {
  
   public boolean isInitialized() { return true; }
  
-  public void recomputeMemory() {}
+  public boolean recomputeMemory(Iterable<ItemStack> components) { return true; }
  
   public boolean initialize() {
     // Set up new VM here, and register all API callbacks you want to
