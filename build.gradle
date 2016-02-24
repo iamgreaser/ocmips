@@ -24,7 +24,7 @@ file "build.properties" withReader {
 apply plugin: 'forge'
 
 version = "${config.mod.version}"
-group = "li.cil.oc.example"
+group = "potato.chocolate.mods.ebola.arch.mips"
 archivesBaseName = rootProject.name
 
 ext.simpleVersion = version

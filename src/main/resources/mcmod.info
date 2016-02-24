@@ -1,0 +1,18 @@
+[{
+  "modid": "OpenComputers|MIPS",
+  "name": "MIPS for OpenComputers",
+  "description": "Finally, a real CPU for OpenComputers!",
+  "version": "${version}",
+  "mcversion": "${mcversion}",
+  "url": "http://zombo.com/",
+  "authorList": ["GreaseMonkey", "gamax92", "Sangar"],
+  "credits" : "Inspired by a couple of other mods, most notably ComputerCraft.",
+  "logoFile" : "assets/opencomputers/textures/gui/logo.png",
+  "requiredMods": [ "Forge@[10.13.4.1448,)" ],
+  "dependencies": [
+    "OpenComputers"
+  ],
+  "dependants": [],
+  "useDependencyInformation": "true"
+}]
+
