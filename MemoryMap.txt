@@ -1,0 +1,90 @@
+0x00000000-0x???????? = RAM:
+  0x00001000-0x00001FFF = EEPROM boot space
+0x1FF00000-0x1FFFFFFF = I/O space
+
+EEPROM memory map:
+  0x0000????-0x00004000 = initial stack pointer
+  0x00010000-0x???????? = where boot.elf is unpacked to 
+
+I/O:
+
+these use the first GPU in the component list.
+they are SLOW. so please avoid using them unless you're desperate.
+TODO: work out how to handle stdin
+0x1FF00004  W   B = write char to stdout
+0x1FF00004 R  W   = read char from stdin (-1 = EOF, -2 = error, -3 = retry)
+// as the GPU debug API isn't in place, these two don't exist.
+// currently they just print to stdout.
+//0x1FF00008 RW  H  = current char X (signed)
+//0x1FF0000A RW  H  = current char Y (signed)
+
+0x1FF00020  W W   = sleep for x milliseconds
+0x1FF00020 R  W   = read wall clock measured in microseconds
+0x1FF00024 R  W   = read wall clock measured in microseconds>>20
+
+0x1FF00200 RW   B = component address
+0x1FF0023E ^^^^^^ = end of component address
+0x1FF0023F R    B = hardwired 0
+0x1FF00240 RW   B = component type/callnamequery
+0x1FF0027E ^^^^^^ = end of component type/callnamequery
+0x1FF0027F R    B = hardwired 0
+
+0x1FF00280 RW W   = component function call name
+0x1FF00284 R    B = component buffer reset strobe (returns device count)
+0x1FF00284  W   B = component search strobe (write 0-based index)
+0x1FF00285 R    B = method buffer reset strobe (returns method count)
+0x1FF00285  W   B = method search strobe (write 0-based index)
+0x1FF00286  W   B = component call strobe (write number of arguments)
+0x1FF00286 R    B = number of return arguments for component call (capped at 32, -1 if error happened)
+0x1FF00287  W   B = fetch string strobe (write return value index)
+0x1FF00287 R    B = event pull strobe (number of returns for event, capped at 32, 0 if no event)
+0x1FF00288 RW W   = fetch string buffer address
+0x1FF0028C RW W   = fetch string buffer length
+
+0x1FF002C0 RW   B = error string
+0x1FF002FE ^^^^^^ = end of error string
+0x1FF002FF R    B = hardwired 0
+
+0x1FF00300 RW W   = component function call argument/return 0 type
+0x1FF00304 RW W   = component function call argument/return 0 value
+0x1FF00308 RW W   = component function call argument/return 1 type
+0x1FF0030C RW W   = component function call argument/return 1 value
+...
+0x1FF003F0 RW W   = component function call argument/return 30 type
+0x1FF003F4 RW W   = component function call argument/return 30 value
+0x1FF003F8 RW W   = component function call argument/return 31 type
+0x1FF003FC RW W   = component function call argument/return 31 value
+
+Component searching:
+- read from component buffer reset strobe
+- for each in there:
+  - write index to component search strobe
+  - check the address/type fields for the condition you want
+  - if they match, do whatever you want, possibly even returning
+  - write to component search strobe
+
+Component calling:
+- ensure address is in its place
+- write a pointer to a string containing the function name
+- write arguments + types to the array
+- write argument count to component call strobe
+- read return value count from component call strobe
+- read return values
+- fetch any strings necessary
+
+Fetching a string argument:
+- read "value" field for actual length
+- write buffer address to value
+- write buffer length
+- write argument index to fetch string strobe
+- read actual length to confirm
+
+Types:
+- 0 = nil
+- 2 = boolean
+- 4 = string (value contains string length)
+- 6 = integer
+- 8 = single-precision float
+- 10 = AbstractValue (e.g. file handles)
+reason for this arrangement is so the low bit could be used to store a double
+
