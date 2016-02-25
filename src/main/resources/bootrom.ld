@@ -3,7 +3,7 @@ OUTPUT_ARCH(mips);
 
 SECTIONS
 {
-	. = 0x00001000;
+	. = 0xA0001000;
 	.text : { *(.text) }
 	.rodata : { *(.rodata*) }
 	.data : { *(.data) }

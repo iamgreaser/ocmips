@@ -1,5 +1,6 @@
 package potato.chocolate.mods.ebola.arch.mips;
 
+import li.cil.oc.api.machine.LimitReachedException;
 import li.cil.oc.api.machine.Signal;
 import li.cil.oc.api.prefab.AbstractValue;
 
@@ -24,9 +25,33 @@ public class Jipsy {
     private int cycle_wait;
     private int pf0;
     private int pf0_pc;
+    private int op_pc;
     private int reset_pc = 0x00001000;
     boolean hard_halted = false;
     boolean need_sleep = false;
+
+    public static final int EX_Int = 0x00; // Interrupt
+    public static final int EX_Mod = 0x01; // TLB modification exception
+    public static final int EX_TLBL = 0x02; // TLB exception (load/ifetch)
+    public static final int EX_TLBS = 0x03; // TLB exception (store)
+    public static final int EX_AdEL = 0x04; // Address error exception (load/ifetch)
+    public static final int EX_AdES = 0x05; // Address error exception (store)
+    public static final int EX_IBE = 0x06; // Bus error exception (ifetch)
+    public static final int EX_DBE = 0x07; // Bus error exception (data: load/store)
+    public static final int EX_Sys = 0x08; // Syscall exception
+    public static final int EX_Bp = 0x09; // Breakpoint exception
+    public static final int EX_RI = 0x0A; // Reserved instruction exception
+    public static final int EX_CpU = 0x0B; // Coprocessor unusable exception
+    public static final int EX_Ov = 0x0C; // Arithmetic overflow exception
+
+    int c0_index; // 0
+    int c0_entrylo; // 2
+    int c0_context; // 4
+    int c0_vaddr; // 8
+    int c0_entryhi; // 10
+    int c0_status; // 12
+    int c0_cause; // 13
+    int c0_epc; // 14
 
     private PseudoVM vm;
     static final int OUTBUF_LEN = 1;
@@ -43,10 +68,17 @@ public class Jipsy {
     int cmp_method_ptr = 0;
     int[][] cmp_arg_typ_list = new int[32][2];
 
+    // 0 = entrylo, 1 = entryhi, 2 = next in queue, 3 = previous in queue
+    int[][] tlb_entries = new int [64][4];
+    int tlb_entry_most_recent = 0;
+
     int cmp_call_retcnt = 0;
     byte[][] cmp_call_retarray = new byte[32][];
     int cmp_call_retptr = 0;
     int cmp_call_retlen = 0;
+    private boolean double_fault_detect = false;
+    private boolean pf0_double_fault_detect = false;
+    private int bd_detect = -1;
 
     public void use_cycles(int count)
     {
@@ -64,18 +96,80 @@ public class Jipsy {
         this.regs[28] = gp;
     }
 
-    public void set_reset_pc(int pc)
+    public void set_reset_pc(int pc) { this.reset_pc = pc; }
+
+    private void reset_tlb()
     {
-        this.reset_pc = pc;
+        int i;
+
+        for(i = 0; i < 64; i++) {
+            tlb_entries[i][0] = 0x00000000;
+            tlb_entries[i][1] = 0x00000000;
+            tlb_entries[i][2] = (i+1)%64;
+            tlb_entries[i][3] = (i+64-1)%64;
+        }
+
+        tlb_entry_most_recent = 0;
+    }
+
+    private void touch_tlb(int idx)
+    {
+        // If most recent, DO NOT DO ANYTHING.
+        if(idx == tlb_entry_most_recent)
+            return;
+
+        // Get previous most recent
+        // System.out.printf("TLB touch: %02X: %08X <- %08X\n"
+                // , idx, tlb_entries[idx][0], tlb_entries[idx][1]);
+        int previdx = tlb_entry_most_recent;
+
+        // Detach current
+        int loc_prev = tlb_entries[idx][3];
+        int loc_next = tlb_entries[idx][2];
+        tlb_entries[loc_next][3] = loc_prev;
+        tlb_entries[loc_prev][2] = loc_next;
+
+        // Steal previous from most recent
+        int prevloc_prev = tlb_entries[previdx][3];
+        tlb_entries[idx][3] = prevloc_prev;
+
+        // We are the new previous
+        tlb_entries[previdx][3] = idx;
+
+        // And the old recent is the new next
+        tlb_entries[idx][2] = previdx;
+
+        // And the old recent previous next is the new recent
+        tlb_entries[prevloc_prev][2] = idx;
+
+        // And, well, we are now the most recent
+        tlb_entry_most_recent = idx;
     }
 
     public void reset()
     {
         this.hard_halted = false;
         this.pc = this.reset_pc;
+
+        // reset TLB
+        this.reset_tlb();
+
+        // reset COP0 and whatnot
+        this.c0_index = 0x00000000;
+        this.c0_entrylo = 0x00000800;
+        this.c0_context = 0x00000000;
+        this.c0_vaddr = 0x00000000;
+        this.c0_entryhi = 0x00000800;
+        this.c0_cause = 0x00000000;
+        this.c0_status = 0x00400000;
+        this.c0_epc = 0x00000000;
+        this.double_fault_detect = false;
+        this.pf0_double_fault_detect = false;
+        this.bd_detect = -1;
+
+        // clear prefetch buffer
         this.pf0_pc = this.pc;
-        this.pf0 = this.mem_read_32(this.pc);
-        this.pc += 4;
+        this.pf0 = 0x00000000; // NOP
     }
 
     public Jipsy(PseudoVM vm, int ram_bytes_)
@@ -90,7 +184,6 @@ public class Jipsy {
         this.ram_bytes = ram_bytes_;
         this.ram = new int[ram_bytes_>>2];
         this.regs = new int[32];
-        this.reset();
         this.cycles = 0;
         this.cycle_wait = 0;
         this.hard_halted = true;
@@ -120,6 +213,10 @@ public class Jipsy {
         } else if(retval instanceof Integer) {
             this.cmp_arg_typ_list[i][1] = 6;
             this.cmp_arg_typ_list[i][0] = (Integer)retval;
+        } else if(retval instanceof Long) {
+            // truncate it anyway
+            this.cmp_arg_typ_list[i][1] = 6;
+            this.cmp_arg_typ_list[i][0] = (int)(long)(Long)retval;
         } else if(retval instanceof Float) {
             this.cmp_arg_typ_list[i][1] = 8;
             this.cmp_arg_typ_list[i][0] = Float.floatToIntBits((Float)retval);
@@ -192,9 +289,10 @@ public class Jipsy {
                 case 0x00004:
                     //try
                     //{
-                    // TODO: debug port input
-                    return 0xFF&(int)'e';
-                    //return -3;
+                    // debug port input doesn't exist here
+                    // it might in future, but right now it does NOT.
+                    //return 0xFF&(int)'e';
+                    return -3;
                 //return System.in.read();
                 //} catch(IOException _e) {
                 //return -2;
@@ -406,7 +504,9 @@ public class Jipsy {
                     //System.out.printf("%c", data_);
                     this.outbuf += (char) data_;
                     if (this.outbuf.length() >= OUTBUF_LEN) {
-                        System.out.print(this.outbuf);
+                        // debug output disabled for now.
+                        // might be useful for the analyser, though!
+                        //System.out.print(this.outbuf);
                         this.outbuf = "";
                     }
                     return;
@@ -450,7 +550,7 @@ public class Jipsy {
                     String address = new String(this.cmp_buf_addr);
                     if(address.indexOf('\u0000') >= 0)
                         address = address.substring(0, address.indexOf('\u0000'));
-                    String method_name = mem_read_cstr(this.cmp_method_ptr);
+                    String method_name = mem_read_cstr(this.cmp_method_ptr & 0x1FFFFFFF);
                     //System.out.printf("Calling %s method %s...\n", address, method_name);
                     int arg_count = Math.min(32, data_);
                     Object[] args = new Object[arg_count];
@@ -464,7 +564,7 @@ public class Jipsy {
                                 args[i] = (cmp_arg_typ_list[i][0] != 0);
                                 break;
                             case 4: // string
-                                args[i] = mem_read_cstr(this.cmp_arg_typ_list[i][0]);
+                                args[i] = mem_read_cstr(this.cmp_arg_typ_list[i][0] & 0x1FFFFFFF);
                                 break;
                             case 6: // int
                                 args[i] = this.cmp_arg_typ_list[i][0];
@@ -492,14 +592,27 @@ public class Jipsy {
 
                     // get return count back
                     try {
-                        Object[] rets = vm.machine.invoke(address, method_name, args);
+                        Object[] rets;
+                        try {
+                            rets = vm.machine.invoke(address, method_name, args);
+                        } catch(LimitReachedException e) {
+                            // jump back to here
+                            // FIXME: BLATANT HACK
+                            System.err.printf("limit reached - restarting call\n");
+                            this.pc = this.op_pc;
+                            this.pf0_pc = this.pc;
+                            this.pf0 = 0x00000000; // NOP
+                            this.need_sleep = true;
+                            return;
+                        }
+
                         this.cmp_call_retcnt = (rets == null ? 0 : rets.length);
                         for (int i = 0; i < this.cmp_call_retcnt; i++) {
                             parse_retval(i, rets[i]);
                         }
                     } catch(Exception e) {
-                        System.err.printf("exception!\n");
-                        e.printStackTrace();
+                        //System.err.printf("exception!\n");
+                        //e.printStackTrace();
                         String err = e.getMessage();
                         byte[] b = err.getBytes();
                         System.arraycopy(b, 0, this.cmp_buf_error, 0, Math.min(63, b.length));
@@ -507,8 +620,6 @@ public class Jipsy {
                         this.cmp_buf_error[63] = 0;
                         this.cmp_call_retcnt = -1;
                     }
-                    // force a sleep
-                    this.need_sleep = true;
                     return;
                 }
 
@@ -523,7 +634,8 @@ public class Jipsy {
                     for(int i = 0; i < Math.min(this.cmp_call_retlen,
                             this.cmp_call_retarray[data_].length); i++)
                     {
-                        this.mem_write_8(this.cmp_call_retptr+i, this.cmp_call_retarray[data_][i]);
+                        // lop off top few bits for convenience
+                        this.mem_write_8((this.cmp_call_retptr+i) & 0x1FFFFFFF, this.cmp_call_retarray[data_][i]);
                         this.cycles += 1;
                     }
 
@@ -549,16 +661,191 @@ public class Jipsy {
         // TODO!
     }
 
+    private int remap_tlb(int addr_, boolean is_write)
+    {
+        // TEST: disable TLB?
+        if(false) return addr_&0x7FFFFFFF;
+
+        // Expected vaddr
+        int expect_ehi = (addr_&~0xFFF)|(c0_entryhi&0xFC0);
+
+        // Read TLB
+        for(int i = 0, idx = tlb_entry_most_recent; i < 64; i++, idx = tlb_entries[idx][2]) {
+            // Fetch TLB entry
+            int elo = tlb_entries[idx][0]; // physical + flags
+            int ehi = tlb_entries[idx][1]; // virtual  + ASID
+
+            // Check if valid
+            if((elo & 0x200) != 0) {
+
+                // Check if global
+                if ((elo & 0x100) != 0)
+                    ehi = (ehi & ~0xFC0) | (c0_entryhi & 0xFC0);
+
+                // Check if vaddr in range
+                if (ehi == expect_ehi) {
+                    // This is our TLB!
+
+                    // Check dirty flag
+                    if(is_write && (elo & 0x400) == 0) {
+                        // Cannot write to this page!
+                        c0_vaddr = addr_;
+                        return -1-EX_Mod;
+                    }
+
+                    touch_tlb(idx);
+                    return (addr_&0xFFF)|(elo&0x7FFFF000);
+                }
+            }
+
+            // Punish anyone who wants to be a dick with the TLB
+            if((i&3) == 3) this.cycles += 1;
+        }
+
+        // TLB fault!
+        c0_vaddr = addr_;
+        return -1-EX_TLBL;
+    }
+
+    private int remap_address_main(int addr_, boolean is_write)
+    {
+        if((addr_ & 0x80000000) == 0) {
+            return remap_tlb(addr_, is_write);
+
+        } else if((c0_status & (1<<0)) != 0) {
+            // user mode does NOT have access to here
+            c0_vaddr = addr_;
+            return -1-EX_AdEL;
+
+        } else {
+            switch((addr_>>>29)&3)
+            {
+                default:
+                case 0: // kernel unmapped
+                    return addr_&0x1FFFFFFF;
+                case 1: // kernel unmapped uncached
+                    return addr_&0x1FFFFFFF;
+                case 2: // kernel mapped
+                case 3:
+                    return remap_tlb(addr_, is_write);
+            }
+        }
+    }
+
+    private int remap_address(int addr_, boolean is_write)
+    {
+        // get address
+        addr_ = remap_address_main(addr_, is_write);
+
+        // check if faulted
+        if(addr_ < 0)
+            return addr_;
+
+        // check if in I/O space
+        if((addr_ & 0xFFF00000) == 0x1FF00000)
+            return addr_;
+
+        // do some basic RAM remaps
+        if((addr_ & 0xFFFFF000) == 0x1FC00000)
+            addr_ = (addr_ & 0xFFF) | 0x00000000;
+
+        // check if in RAM range
+        if(addr_ < this.ram_bytes)
+            return addr_;
+
+        // fault!
+        return -1-EX_DBE;
+    }
+
+    private void isr(int fault, int ce)
+    {
+        if(this.double_fault_detect)
+            throw new RuntimeException(String.format("2xfault 0x%02X @ %08X"
+                    ,(this.c0_cause>>2)&15
+                    , this.c0_epc));
+
+        this.double_fault_detect = true;
+        this.pf0_double_fault_detect = true;
+
+        int bd = (this.bd_detect==this.op_pc?1:0);
+
+        this.c0_cause = (this.c0_cause & ~0xB000003C)
+                | ((fault&15)<<2)
+                | ((bd&1)<<31)
+                | ((ce&3)<<28)
+                ;
+
+        this.c0_epc = this.op_pc - (bd<<2);
+        c0_status = (c0_status & ~0x3F)
+                | ((c0_status<<2) & 0x3C)
+                | 0x0
+                ;
+
+        c0_context = (c0_context & 0xFF800000) | ((c0_vaddr>>>12) & 0x0007FFFF);
+
+        boolean is_utlb_miss = (
+                (fault == EX_TLBL || fault == EX_TLBS)
+                && (c0_vaddr & 0x80000000) == 0);
+
+        this.pc = (((this.c0_status&(1<<22)) != 0)
+            ? 0xBFC00100
+            : 0x80000000) + (is_utlb_miss ? 0x00 : 0x80);
+        this.pf0_pc = this.pc;
+        this.pf0 = 0x00000000; // NOP
+
+        /*
+        System.err.printf("FAULT: C=%08X SR=%08X EPC=%08X PC=%08X\n"
+            , this.c0_cause, this.c0_status, this.c0_epc, this.pc);
+        if(bd != 0)
+            System.err.printf("BRANCH DELAY FAULT\n");
+        */
+
+        this.need_sleep = true;
+        this.bd_detect = -1;
+    }
+
     public void run_op()
     {
-        // Fetch
+        // Update PC address
         int op = this.pf0;
         int pc = this.pf0_pc;
-        int new_op = this.mem_read_32(this.pc);
+        this.op_pc = pc;
+
+        // Get expected PC address
+        int phys_pc = this.remap_address(this.pc, false);
+
+        if(phys_pc < 0) {
+            int fault = -phys_pc-1;
+            if(fault == EX_DBE) fault = EX_IBE;
+            this.isr(fault, 0);
+            return;
+        }
+
+        // FIXME: clear bd_detect once branched
+        // here's a case where it'll break:
+        //     b L0
+        // L0: addiu $v0, $v0, 1
+        //
+        // if an interrupt fires on the second execution of addiu and cancels the op,
+        // it will jump back to the branch and add 3 total,
+        // instead of the expected 2.
+        //
+        // another case is if you manage to somehow wrap the whole entire address space
+        // and remove the branch,
+        // but thankfully that's not actually possible.
+
+        // Fetch
+        int new_op = this.mem_read_32(phys_pc);
         this.pf0 = new_op;
         this.pf0_pc = this.pc;
         this.pc += 4;
         this.cycles += 1;
+
+        //System.err.printf("PC = %08X -> %08X - op = %08X", this.pc, phys_pc, new_op);
+
+        // Detect double fault
+        boolean next_double_fault = this.pf0_double_fault_detect;
+        this.pf0_double_fault_detect = false;
 
         int otyp0 = (op>>>26);
         int rs = (op>>>21)&0x1F;
@@ -600,7 +887,15 @@ public class Jipsy {
                 this.regs[rd] = pc+8;
             case 0x08: // JR
                 this.pc = this.regs[rs];
+                this.bd_detect = this.op_pc+4;
                 break;
+
+            case 0x0C: // SYSCALL
+                this.isr(EX_Sys, 0);
+                return;
+            case 0x0D: // BREAK
+                this.isr(EX_Bp, 0);
+                return;
 
             // XXX: do we pipeline lo/hi and introduce delays?
             case 0x10: // MFHI
@@ -682,11 +977,33 @@ public class Jipsy {
                 break;
 
             case 0x20: // ADD
+                tmp0 = this.regs[rs] + this.regs[rt];
+                if((this.regs[rs] <= 0) == (this.regs[rt] <= 0)
+                        && (tmp0 <= 0) != (this.regs[rs] <= 0)) {
+
+                    this.isr(EX_Ov, 0);
+                    return;
+                } else {
+                    if (rd != 0) this.regs[rd] = tmp0;
+                }
+                break;
+
             case 0x21: // ADDU
                 if(rd != 0) this.regs[rd] = this.regs[rs] + this.regs[rt];
                 break;
 
             case 0x22: // SUB
+                tmp0 = this.regs[rs] - this.regs[rt];
+                if((this.regs[rs] <= 0) == (this.regs[rt] >= 0)
+                        && (tmp0 <= 0) != (this.regs[rs] <= 0)) {
+
+                    this.isr(EX_Ov, 0);
+                    return;
+                } else {
+                    if (rd != 0) this.regs[rd] = tmp0;
+                }
+                break;
+
             case 0x23: // SUBU
                 if(rd != 0) this.regs[rd] = this.regs[rs] - this.regs[rt];
                 break;
@@ -715,60 +1032,97 @@ public class Jipsy {
 
             default:
                 System.out.printf("%08X: %08X %02X\n", pc, op, otyp1);
-                throw new RuntimeException("unsupported SPECIAL op");
+                {
+                    this.isr(EX_RI, 0);
+                    return;
+                }
 
         } else if(otyp0 == 0x01) switch(rt) {
 
             case 0x00: // BLTZ
-                if(this.regs[rs] <  0)
-                    this.pc = pc + 4 + (((int)(short)op)<<2);
+                // XXX: I don't know if this is set regardless of branch
+                // Either way, both behaviours are plausible
+                // In this case we're going with "set only if taken"
+                if(this.regs[rs] <  0) {
+                    this.pc = pc + 4 + (((int) (short) op) << 2);
+                    this.bd_detect = this.op_pc+4;
+                }
                 break;
             case 0x01: // BGEZ
-                if(this.regs[rs] >= 0)
-                    this.pc = pc + 4 + (((int)(short)op)<<2);
+                if(this.regs[rs] >= 0) {
+                    this.pc = pc + 4 + (((int) (short) op) << 2);
+                    this.bd_detect = this.op_pc+4;
+                }
                 break;
 
             case 0x10: // BLTZAL
-                if(this.regs[rs] <  0)
-                {
+                if(this.regs[rs] <  0) {
                     this.regs[31] = pc + 8;
                     this.pc = pc + 4 + (((int)(short)op)<<2);
+                    this.bd_detect = this.op_pc+4;
                 }
                 break;
             case 0x11: // BGEZAL
-                if(this.regs[rs] >= 0)
-                {
+                if(this.regs[rs] >= 0) {
                     this.regs[31] = pc + 8;
                     this.pc = pc + 4 + (((int)(short)op)<<2);
+                    this.bd_detect = this.op_pc+4;
                 }
                 break;
             default:
                 System.out.printf("%08X: %08X %02X\n", pc, op, rt);
-                throw new RuntimeException("unsupported BRANCH op");
-        
+                {
+                    this.isr(EX_RI, 0);
+                    return;
+                }
+
         } else switch(otyp0) {
 
             case 0x03: // JAL
                 this.regs[31] = pc + 8;
             case 0x02: // J
                 this.pc = (pc & 0xF0000000)|((op&((1<<26)-1))<<2);
+                this.bd_detect = this.op_pc+4;
                 break;
 
             case 0x04: // BEQ
-                if(this.regs[rs] == this.regs[rt]) this.pc = pc + 4 + (((int)(short)op)<<2);
+                if(this.regs[rs] == this.regs[rt]) {
+                    this.pc = pc + 4 + (((int)(short)op)<<2);
+                    this.bd_detect = this.op_pc+4;
+                }
                 break;
             case 0x05: // BNE
-                if(this.regs[rs] != this.regs[rt]) this.pc = pc + 4 + (((int)(short)op)<<2);
+                if(this.regs[rs] != this.regs[rt]) {
+                    this.pc = pc + 4 + (((int)(short)op)<<2);
+                    this.bd_detect = this.op_pc+4;
+                }
                 break;
             case 0x06: // BLEZ
-                if(this.regs[rs] <= 0) this.pc = pc + 4 + (((int)(short)op)<<2);
+                if(this.regs[rs] <= 0) {
+                    this.pc = pc + 4 + (((int)(short)op)<<2);
+                    this.bd_detect = this.op_pc+4;
+                }
                 break;
             case 0x07: // BGTZ
-                if(this.regs[rs] >  0) this.pc = pc + 4 + (((int)(short)op)<<2);
+                if(this.regs[rs] >  0) {
+                    this.pc = pc + 4 + (((int)(short)op)<<2);
+                    this.bd_detect = this.op_pc+4;
+                }
                 break;
 
-            // TODO: trap on non-U arithmetic ops
             case 0x08: // ADDI
+                tmp1 = (int)(short)op;
+                tmp0 = this.regs[rs] + tmp1;
+                if((this.regs[rs] <= 0) == (tmp1 <= 0)
+                        && (tmp0 <= 0) != (this.regs[rs] <= 0)) {
+
+                    this.isr(EX_Ov, 0);
+                    return;
+                } else {
+                    if (rt != 0) this.regs[rt] = tmp0;
+                }
+                break;
+
             case 0x09: // ADDIU
                 if(rt != 0) this.regs[rt] = this.regs[rs] + (int)(short)op;
                 break;
@@ -795,50 +1149,287 @@ public class Jipsy {
                 if(rt != 0) this.regs[rt] = (op&0xFFFF)<<16;
                 break;
 
-            /*
             case 0x10: // COP0
-                // TODO!
-                System.out.printf("%08X: COP0 %02X\n", pc, op);
+            case 0x11: // COP1
+            case 0x12: // COP2
+            case 0x13: // COP3
+                // Check if coprocessor enabled
+                if(((otyp0&3) != 0 || (c0_status&(1<<1)) != 0)
+                        && 0 != (c0_status&(1<<(28+(otyp0&3))))) { // LISP poster-child in Java
+                    this.isr(EX_CpU, otyp0&3);
+                    return;
+                }
+
+                // No, these aren't supported either
+                if((otyp0&3) != 0) {
+                    this.isr(EX_CpU, otyp0&3);
+                    return;
+                }
+
+                // Check op type
+                if(rs >= 16) switch(otyp1){
+                    case 0x01: {
+                        // TLBR
+                        c0_entrylo = tlb_entries[(c0_index>>8)&63][0];
+                        c0_entryhi = tlb_entries[(c0_index>>8)&63][1];
+                    } break;
+
+                    case 0x02: {
+                        // TLBWI
+                        // TODO: detect TLB match and set TLB Shutdown flag
+                        // allegedly this is optional but potentially dangerous without it
+                        // MIPS32 also defines a machine check exception @ 0x18,
+                        // but this is out of range.
+                        tlb_entries[(c0_index>>8)&63][0] = c0_entrylo;
+                        tlb_entries[(c0_index>>8)&63][1] = c0_entryhi;
+                    } break;
+
+                    case 0x06: {
+                        // TLBWR
+                        // use most rarely touched one
+                        // TODO: detect TLB match
+                        int i, idx;
+                        for(i=0, idx=tlb_entries[tlb_entry_most_recent][3]; i < 64; i++)
+                        {
+                            // is this TLB unwired?
+                            if(idx >= 8) {
+                                // touch and go
+                                tlb_entries[idx][0] = c0_entrylo;
+                                tlb_entries[idx][1] = c0_entryhi;
+                                System.out.printf("TLBWR: %02X %08X <- %08X\n", idx, c0_entrylo, c0_entryhi);
+                                touch_tlb(idx);
+                                break;
+                            }
+
+                            // step back
+                            idx=tlb_entries[idx][3];
+                            this.cycles += 1;
+                        }
+
+                        if(i >= 64) {
+                            // well, shit.
+                            throw new RuntimeException("BUG: TLB chain has no unwired pages?!");
+                        }
+                    } break;
+
+                    case 0x08: {
+                        // TLBP
+                        int fault = remap_tlb(c0_entryhi, false);
+                        if(fault >= 0) {
+                            c0_index = this.tlb_entry_most_recent<<8;
+                        } else {
+                            c0_index = 0x80000000;
+                        }
+                    } break;
+
+                    case 0x10: // RFE
+                        c0_status = (c0_status & ~0x0F) | ((c0_status>>2) & 0x0F);
+                        break;
+
+                    default:
+                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                        this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                        return;
+
+                } else switch(rs) {
+                    case 0: // MFCn
+                        switch(rd) {
+                            case 0: // TLB index
+                                tmp0 = c0_index;
+                                break;
+                            case 1: // TLB random index
+                                tmp0 = ((int)(Math.random()*(64-8)+8))<<8;
+                                break;
+                            case 2: // TLB entrylo (phys + flags)
+                                tmp0 = c0_entrylo;
+                                break;
+                            case 4: // Context + bad virtual address
+                                tmp0 = c0_context;
+                                break;
+                            case 8: // Bad virtual address
+                                tmp0 = c0_vaddr;
+                                break;
+                            case 10: // TLB entryhi (virt + ASID)
+                                tmp0 = c0_entryhi;
+                                break;
+                            case 12: // SR
+                                tmp0 = c0_status;
+                                break;
+                            case 13: // Cause
+                                tmp0 = c0_cause;
+                                break;
+                            case 14: // EPC
+                                tmp0 = c0_epc;
+                                break;
+                            default:
+                                System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                                this.isr(EX_RI, 0);
+                                return;
+                        }
+                        if(rt != 0)
+                            this.regs[rt] = tmp0;
+                        break;
+                    case 2: // CFCn
+                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                        this.isr(EX_RI, 0);
+                        return;
+                    case 4: // MTCn
+                        tmp0 = this.regs[rt];
+                        switch(rd) {
+                            case 0: // TLB index
+                                tmp1 = 0x00003F00;
+                                c0_index = (c0_index & ~tmp1) | (tmp0 & tmp1);
+                                break;
+                            case 2: // TLB entrylo (phys + flags)
+                                tmp1 = 0xFFFFFF00;
+                                c0_entrylo = (c0_entrylo & ~tmp1) | (tmp0 & tmp1);
+                                break;
+                            case 4: // Context + bad virtual address
+                                tmp1 = 0xFF800000;
+                                c0_context = (c0_context & ~tmp1) | (tmp0 & tmp1);
+                                break;
+                            case 10: // TLB entryhi (virt + ASID)
+                                tmp1 = 0xFFFFFFC0;
+                                c0_entryhi = (c0_entryhi & ~tmp1) | (tmp0 & tmp1);
+                                break;
+                            case 12: // Status
+                                tmp1 = 0x1040FF3F;
+                                c0_status = (c0_status & ~tmp1) | (tmp0 & tmp1);
+                                break;
+
+                            case 13: // Cause
+                                // You can write to the software interrupt bits.
+                                // This requests an interrupt.
+                                tmp1 = 0x00000300;
+                                c0_cause = (c0_cause & ~tmp1) | (tmp0 & tmp1);
+                                break;
+
+                            case 14: // EPC
+                                // Apparently you can write anything to this
+                                c0_epc = tmp0;
+                                break;
+
+                            default:
+                                System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                                this.isr(EX_RI, 0);
+                                return;
+                        } break;
+
+                    case 6: // CTCn
+                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                        this.isr(EX_RI, 0);
+                        return;
+                    default:
+                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                        this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                        return;
+                }
+
                 break;
-            */
 
             case 0x20: // LB
-                tmp0 = (int)this.mem_read_8(this.regs[rs] + (int)(short)op);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.isr(fault, 0);
+                    return;
+                }
+                tmp0 = (int)this.mem_read_8(tmp1);
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
             case 0x21: // LH
-                tmp0 = (int)this.mem_read_16(this.regs[rs] + (int)(short)op);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
+                if(tmp1 >= 0 && (tmp1&1) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.isr(fault, 0);
+                    return;
+                }
+                tmp0 = (int)this.mem_read_16(tmp1);
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
             case 0x23: // LW
-                tmp0 = this.mem_read_32(this.regs[rs] + (int)(short)op);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
+                if(tmp1 >= 0 && (tmp1&3) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.isr(fault, 0);
+                    return;
+                }
+                tmp0 = this.mem_read_32(tmp1);
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
             case 0x24: // LBU
-                tmp0 = 0xFF&((int)(this.mem_read_8(this.regs[rs] + (int)(short)op)));
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.isr(fault, 0);
+                    return;
+                }
+                tmp0 = 0xFF&((int)(this.mem_read_8(tmp1)));
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
             case 0x25: // LHU
-                tmp0 = 0xFFFF&((int)(this.mem_read_16(this.regs[rs] + (int)(short)op)));
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
+                if(tmp1 >= 0 && (tmp1&1) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.c0_cause = (this.c0_cause & ~0x3C) | ((fault<<2)&15);
+                    throw new RuntimeException(String.format("LHU fault 0x%02X", fault));
+                }
+                tmp0 = 0xFFFF&((int)(this.mem_read_16(tmp1)));
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
 
             case 0x28: // SB
-                this.mem_write_8(this.regs[rs] + (int)(short)op, (byte)this.regs[rt]);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, true);
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    if(fault == EX_TLBL) fault = EX_TLBS;
+                    if(fault == EX_AdEL) fault = EX_AdES;
+                    this.isr(fault, 0);
+                    return;
+                }
+                this.mem_write_8(tmp1, (byte)this.regs[rt]);
                 this.cycles += 1;
                 break;
             case 0x29: // SH
-                //System.out.printf("%08X %08X\n", this.regs[rs], (int)(short)op);
-                this.mem_write_16(this.regs[rs] + (int)(short)op, (short)this.regs[rt]);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, true);
+                if(tmp1 >= 0 && (tmp1&1) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    if(fault == EX_TLBL) fault = EX_TLBS;
+                    if(fault == EX_AdEL) fault = EX_AdES;
+                    this.isr(fault, 0);
+                    return;
+                }
+                this.mem_write_16(tmp1, (short)this.regs[rt]);
                 this.cycles += 1;
                 break;
             case 0x2B: // SW
-                this.mem_write_32(this.regs[rs] + (int)(short)op, this.regs[rt]);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, true);
+                if(tmp1 >= 0 && (tmp1&3) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    if(fault == EX_TLBL) fault = EX_TLBS;
+                    if(fault == EX_AdEL) fault = EX_AdES;
+                    this.isr(fault, 0);
+                    return;
+                }
+                this.mem_write_32(tmp1, this.regs[rt]);
                 this.cycles += 1;
                 break;
 
@@ -850,7 +1441,12 @@ public class Jipsy {
             //
             // TODO: abuse pipeline bypass
             case 0x22: // LWL
-                tmp1 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, false);
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.isr(fault, 0);
+                    return;
+                }
                 tmp0 = this.mem_read_32(tmp1&~3);
                 tmp1 ^= 3;
                 this.cycles += 1;
@@ -859,7 +1455,12 @@ public class Jipsy {
                 //System.out.printf("LWL %08X %d\n", this.regs[rt], tmp1&3);
                 break;
             case 0x26: // LWR
-                tmp1 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, false);
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.isr(fault, 0);
+                    return;
+                }
                 tmp0 = this.mem_read_32(tmp1&~3);
                 this.cycles += 1;
                 if(rt != 0) this.regs[rt] = (this.regs[rt] & ~(0xFFFFFFFF>>>((tmp1&3)<<3))
@@ -878,7 +1479,14 @@ public class Jipsy {
             // the other 24bit of Rt and [mem] will remain intact.
             // ^ this is the not so critical point as it's almost obvious
             case 0x2A: // SWL
-                tmp1 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, true);
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    if(fault == EX_TLBL) fault = EX_TLBS;
+                    if(fault == EX_AdEL) fault = EX_AdES;
+                    this.isr(fault, 0);
+                    return;
+                }
                 tmp0 = this.regs[rt];
                 tmp1 ^= 3;
                 //System.out.printf("SWL %d\n", tmp1&3);
@@ -887,7 +1495,14 @@ public class Jipsy {
                 this.cycles += 1;
                 break;
             case 0x2E: // SWR
-                tmp1 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, true);
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    if(fault == EX_TLBL) fault = EX_TLBS;
+                    if(fault == EX_AdEL) fault = EX_AdES;
+                    this.isr(fault, 0);
+                    return;
+                }
                 tmp0 = this.regs[rt];
                 //System.out.printf("SWR %d\n", tmp1&3);
                 this.mem_write_32_masked(tmp1&~3, tmp0<<((tmp1&3)<<3),
@@ -897,8 +1512,10 @@ public class Jipsy {
 
             default:
                 System.out.printf("%08X: %08X %02X\n", pc, op, otyp0);
-                throw new RuntimeException("unsupported op");
+                this.isr(EX_RI, 0);
         }
+
+        this.double_fault_detect = next_double_fault;
     }
 
     public void run_cycles(int ccount)
@@ -910,7 +1527,7 @@ public class Jipsy {
         int cyc_end = this.cycles + ccount - this.cycle_wait;
 
         this.need_sleep = false;
-        while(!this.hard_halted && !this.need_sleep && (cyc_end - this.cycles) >= 0 && this.pc > 0x100)
+        while(!this.hard_halted && !this.need_sleep && (cyc_end - this.cycles) >= 0)
         {
             int pc = this.pc;
 
@@ -926,13 +1543,8 @@ public class Jipsy {
 
         if(this.outbuf.length() > 0)
         {
-            System.out.print(this.outbuf);
+            //System.out.print(this.outbuf);
             this.outbuf = "";
-        }
-
-        if(this.pc <= 0x100)
-        {
-            this.hard_halted = true;
         }
 
         this.cycle_wait = Math.max(0, this.cycles - cyc_end);

@@ -2,15 +2,24 @@ MIPS for OpenComputers. 'Nuff said.
 
 Consult MemoryMap.txt for more info on how to code for this damn thing.
 
-This comes with an ELF bootloader! Set your start address to somewhere after the first 64KB (`-Wl,-Ttext-segment=0x10000`), and rock on!
+This comes with an ELF bootloader!
+Set your start address to somewhere after the first 64KB in unmapped space
+(`-Wl,-Ttext-segment=0xA0010000` works fine), and rock on!
 
-Currently, the place to put your preferred OS kernel is
+Note, the bootloader will let you use the user space as it has an identity paging handler,
+but this is not recommended.
+
+Nevertheless, I have a working Lua 5.3 implementation that's been compiled
+to test this facility.
+
+Currently, the place to put your preferred OS kernel is:
 
 ```
 src/main/resources/assets/ocmips/lua53/init.elf
 ```
 
-For now, ask on #oc if you want the latest Lua 5.3.2 build. Otherwise, `src/main/resources/labour.c` is a useful library.
+For now, ask on #oc if you want the latest Lua 5.3.2 build.
+Otherwise, `src/main/resources/labour.c` is a useful library.
 
 (TODO: make bootloader not load entire file into memory before parsing)
 

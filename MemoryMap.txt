@@ -1,59 +1,72 @@
-0x00000000-0x???????? = RAM:
+Standard MIPS-I memory map:
+  0x00000000-0x7FFFFFFF = useg/kuseg: user-mode virtual memory
+  0x80000000-0x9FFFFFFF = kseg0: kernel-mode physical memory
+  0xA0000000-0xBFFFFFFF = kseg1: kernel-mode UNCACHED physical memory
+  0xC0000000-0xFFFFFFFF = kseg2: kernel-mode virtual memory
+
+Physical memory map:
+  0x00000000-0x0FFFFFFF = RAM
+  0x1FC00000-0x1FC00FFF = mirror of 0x00000000 in RAM
+  0x1FC01000-0x1FEFFFFF = *FAULT*
+  0x1FF00000-0x1FFFFFFF = I/O space
+  0x20000000-0x7FFFFFFF = *FAULT*
+  0x80000000-0xFFFFFFFF = mirror of 0x00000000-0x7FFFFFFF (blame Java)
+
+RAM address space (PHYSICAL MEMORY):
   0x00001000-0x00001FFF = EEPROM boot space
-0x1FF00000-0x1FFFFFFF = I/O space
 
 EEPROM memory map:
-  0x0000????-0x00004000 = initial stack pointer
-  0x00010000-0x???????? = where boot.elf is unpacked to 
+  0xA000????-0xA0004000 = initial stack pointer
+  0xA0010000-0x???????? = where boot.elf is unpacked to
 
 I/O:
 
 these use the first GPU in the component list.
 they are SLOW. so please avoid using them unless you're desperate.
 TODO: work out how to handle stdin
-0x1FF00004  W   B = write char to stdout
-0x1FF00004 R  W   = read char from stdin (-1 = EOF, -2 = error, -3 = retry)
+0xBFF00004  W   B = write char to stdout
+0xBFF00004 R  W   = read char from stdin (-1 = EOF, -2 = error, -3 = retry)
 // as the GPU debug API isn't in place, these two don't exist.
 // currently they just print to stdout.
-//0x1FF00008 RW  H  = current char X (signed)
-//0x1FF0000A RW  H  = current char Y (signed)
+//0xBFF00008 RW  H  = current char X (signed)
+//0xBFF0000A RW  H  = current char Y (signed)
 
-0x1FF00020  W W   = sleep for x milliseconds
-0x1FF00020 R  W   = read wall clock measured in microseconds
-0x1FF00024 R  W   = read wall clock measured in microseconds>>20
+0xBFF00020  W W   = sleep for x milliseconds
+0xBFF00020 R  W   = read wall clock measured in microseconds
+0xBFF00024 R  W   = read wall clock measured in microseconds>>20
 
-0x1FF00200 RW   B = component address
-0x1FF0023E ^^^^^^ = end of component address
-0x1FF0023F R    B = hardwired 0
-0x1FF00240 RW   B = component type/callnamequery
-0x1FF0027E ^^^^^^ = end of component type/callnamequery
-0x1FF0027F R    B = hardwired 0
+0xBFF00200 RW   B = component address
+0xBFF0023E ^^^^^^ = end of component address
+0xBFF0023F R    B = hardwired 0
+0xBFF00240 RW   B = component type/callnamequery
+0xBFF0027E ^^^^^^ = end of component type/callnamequery
+0xBFF0027F R    B = hardwired 0
 
-0x1FF00280 RW W   = component function call name
-0x1FF00284 R    B = component buffer reset strobe (returns device count)
-0x1FF00284  W   B = component search strobe (write 0-based index)
-0x1FF00285 R    B = method buffer reset strobe (returns method count)
-0x1FF00285  W   B = method search strobe (write 0-based index)
-0x1FF00286  W   B = component call strobe (write number of arguments)
-0x1FF00286 R    B = number of return arguments for component call (capped at 32, -1 if error happened)
-0x1FF00287  W   B = fetch string strobe (write return value index)
-0x1FF00287 R    B = event pull strobe (number of returns for event, capped at 32, 0 if no event)
-0x1FF00288 RW W   = fetch string buffer address
-0x1FF0028C RW W   = fetch string buffer length
+0xBFF00280 RW W   = component function call name
+0xBFF00284 R    B = component buffer reset strobe (returns device count)
+0xBFF00284  W   B = component search strobe (write 0-based index)
+0xBFF00285 R    B = method buffer reset strobe (returns method count)
+0xBFF00285  W   B = method search strobe (write 0-based index)
+0xBFF00286  W   B = component call strobe (write number of arguments)
+0xBFF00286 R    B = number of return arguments for component call (capped at 32, -1 if error happened)
+0xBFF00287  W   B = fetch string strobe (write return value index)
+0xBFF00287 R    B = event pull strobe (number of returns for event, capped at 32, 0 if no event)
+0xBFF00288 RW W   = fetch string buffer address
+0xBFF0028C RW W   = fetch string buffer length
 
-0x1FF002C0 RW   B = error string
-0x1FF002FE ^^^^^^ = end of error string
-0x1FF002FF R    B = hardwired 0
+0xBFF002C0 RW   B = error string
+0xBFF002FE ^^^^^^ = end of error string
+0xBFF002FF R    B = hardwired 0
 
-0x1FF00300 RW W   = component function call argument/return 0 type
-0x1FF00304 RW W   = component function call argument/return 0 value
-0x1FF00308 RW W   = component function call argument/return 1 type
-0x1FF0030C RW W   = component function call argument/return 1 value
+0xBFF00300 RW W   = component function call argument/return 0 type
+0xBFF00304 RW W   = component function call argument/return 0 value
+0xBFF00308 RW W   = component function call argument/return 1 type
+0xBFF0030C RW W   = component function call argument/return 1 value
 ...
-0x1FF003F0 RW W   = component function call argument/return 30 type
-0x1FF003F4 RW W   = component function call argument/return 30 value
-0x1FF003F8 RW W   = component function call argument/return 31 type
-0x1FF003FC RW W   = component function call argument/return 31 value
+0xBFF003F0 RW W   = component function call argument/return 30 type
+0xBFF003F4 RW W   = component function call argument/return 30 value
+0xBFF003F8 RW W   = component function call argument/return 31 type
+0xBFF003FC RW W   = component function call argument/return 31 value
 
 Component searching:
 - read from component buffer reset strobe
@@ -87,4 +100,10 @@ Types:
 - 8 = single-precision float
 - 10 = AbstractValue (e.g. file handles)
 reason for this arrangement is so the low bit could be used to store a double
+
+COP0 is implemented as per this document (mostly):
+http://mescal.imag.fr/membres/vania.marangozova-martin/TEACHING/NACHOS/NACHOS_DOC/mips.html
+
+Known errata in that document (cross-referencing psx-spx and MIPS_Vol3.pdf):
+- IntMask: 1 is ENABLE, not disable as the doc suggests.
 

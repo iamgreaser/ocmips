@@ -93,9 +93,20 @@ public class PseudoVM {
                             mips.mem_write_8(0x00001000+i, eeprom_data[i]);
                         }
 
+                        // set up jump vector
+                        mips.mem_write_32(0x00000000, 0x3C1AA000); // LUI k0,     0xA000
+                        mips.mem_write_32(0x00000004, 0x375A1000); // ORI k0, k0, 0x1000
+                        mips.mem_write_32(0x00000008, 0x03400008); // JR  k0
+                        mips.mem_write_32(0x0000000C, 0x00000000); // NOP
+
+                        // set up invalid ops so we can double-fault and BSOD on exception
+                        mips.mem_write_32(0x00000080, 0xFFFFFFFF);
+                        mips.mem_write_32(0x00000100, 0xFFFFFFFF);
+                        mips.mem_write_32(0x00000180, 0xFFFFFFFF);
+
                         // reset so our first op can be prefetched
-                        mips.set_sp(0x4000); // kinda important!
-                        mips.set_reset_pc(0x1000);
+                        mips.set_sp(0xA0004000); // kinda important!
+                        mips.set_reset_pc(0xBFC00000);
                         mips.reset();
                         System.err.printf("BIOS loaded - EEPROM size = %08X, pc = %08X\n"
                                 , eeprom_data.length, mips.pc);
@@ -129,15 +140,15 @@ public class PseudoVM {
         try {
             if(!mips.hard_halted) {
                 // TODO: adaptive cycle count
-                mips.run_cycles(8000000/20);
+                mips.run_cycles(1000000/20);
                 if(mips.hard_halted){
                     bsod("Halted");
-                } else if(!mips.need_sleep) {
+                } else if(mips.need_sleep) {
                     // XXX: this could really be, y'know, just a single return
                     // instead of having to create an array
                     //
                     // a fine case of OOP used shittily
-                    return new Object[]{(Integer)0};
+                    return new Object[]{(Integer)1};
                 }
             }
 

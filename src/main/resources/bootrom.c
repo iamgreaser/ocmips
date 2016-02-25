@@ -1,7 +1,5 @@
 #if 0
 #mipsel-none-elf-gcc -G0 -fomit-frame-pointer -Wl,-T,bootrom.ld -Os -nostdlib -o boot.elf bootrom.c && \
-
-# Fuck your ABI flags
 #mipsel-none-elf-gcc -G0 -g -Os -fno-toplevel-reorder -fomit-frame-pointer -Wl,-Ttext-segment=0xFE8 -nostdlib -o boot.elf bootrom.c && \
 
 mipsel-none-elf-gcc -G0 -g -O1 -fno-toplevel-reorder -fomit-frame-pointer -Wl,-T,bootrom.ld -nostdlib -o boot.elf bootrom.c && \
@@ -12,16 +10,44 @@ true
 exit $?
 #endif
 
+#include <stdint.h>
+
+#define STYP_NUL 0
+#define STYP_BOL 2
+#define STYP_STR 4
+#define STYP_INT 6
+#define STYP_FLT 8
+#define STYP_HDL 10
+
+#define SYS_ARG_TYP(n) (*(volatile int32_t *)(0x1FF00304+(n)*8))
+#define SYS_ARG_INT(n) (*(volatile int32_t *)(0x1FF00300+(n)*8))
+#define SYS_ARG_FLT(n) (*(volatile float *)(0x1FF00300+(n)*8))
+#define SYS_ARG_STR(n) (*(volatile const char **)(0x1FF00300+(n)*8))
+
 static void _deleg_start(void);
-//void _attribute__((section(".text.startup"))) _very_start(void) {
 void _start(void) {
 	asm volatile (
-		"li $sp, 0xF000"
+		"lui $sp, 0xA000\n"
+		"ori $sp, $sp, 0xF000\n"
 		: : :);
+
+	// set up UTLB handler
+	*(volatile uint32_t *)0xBFC00100 = 0x401A4000; // MFC0  k0, c0_vaddr
+	*(volatile uint32_t *)0xBFC00104 = 0x001AD302; // SRL   k0, k0, 12
+	*(volatile uint32_t *)0xBFC00108 = 0x001AD300; // SLL   k0, k0, 12
+	*(volatile uint32_t *)0xBFC0010C = 0x409A5000; // MTC0  k0, c0_entryhi
+	*(volatile uint32_t *)0xBFC00110 = 0x375A0700; // ORI   k0, k0, 0x0700
+	*(volatile uint32_t *)0xBFC00114 = 0x409A1000; // MTC0  k0, c0_entrylo
+	*(volatile uint32_t *)0xBFC00118 = 0x42000006; // TLBWR
+	*(volatile uint32_t *)0xBFC0011C = 0x00000000; // NOP
+	*(volatile uint32_t *)0xBFC00120 = 0x00000000; // NOP
+	*(volatile uint32_t *)0xBFC00124 = 0x00000000; // NOP
+	*(volatile uint32_t *)0xBFC00128 = 0x401A7000; // MFC0  k0, c0_epc
+	*(volatile uint32_t *)0xBFC0012C = 0x03400008; // JR    k0
+	*(volatile uint32_t *)0xBFC00130 = 0x42000010; // RFE
+
 	_deleg_start();
 }
-
-#include <stdint.h>
 
 static char addr_bootdev[64];
 static char addr_gpu[64];
@@ -92,13 +118,10 @@ static void putch(char c)
 	} else {
 		buffer_copy((char *volatile)0x1FF00200, addr_gpu, 64);
 		*(volatile char **)0x1FF00280 = "set";
-		*(volatile int32_t *)0x1FF00300 = gpu_x;
-		*(volatile int32_t *)0x1FF00304 = 6;
-		*(volatile int32_t *)0x1FF00308 = gpu_y;
-		*(volatile int32_t *)0x1FF0030C = 6;
+		SYS_ARG_INT(0) = gpu_x; SYS_ARG_TYP(0) = STYP_INT;
+		SYS_ARG_INT(1) = gpu_y; SYS_ARG_TYP(1) = STYP_INT;
 		char tbuf[2]; tbuf[0] = c; tbuf[1] = '\x00';
-		*(volatile char **)0x1FF00310 = tbuf;
-		*(volatile int32_t *)0x1FF00314 = 4;
+		SYS_ARG_STR(2) = tbuf; SYS_ARG_TYP(2) = STYP_STR;
 		*(volatile int8_t *)0x1FF00286 = 3;
 		gpu_x++;
 		if(gpu_x > 80)
@@ -146,12 +169,9 @@ static int puts(const char *msg)
 	{
 		buffer_copy((char *volatile)0x1FF00200, addr_gpu, 64);
 		*(volatile char **)0x1FF00280 = "set";
-		*(volatile int32_t *)0x1FF00300 = gpu_x;
-		*(volatile int32_t *)0x1FF00304 = 6;
-		*(volatile int32_t *)0x1FF00308 = gpu_y;
-		*(volatile int32_t *)0x1FF0030C = 6;
-		*(volatile const char **)0x1FF00310 = msg;
-		*(volatile int32_t *)0x1FF00314 = 4;
+		SYS_ARG_INT(0) = gpu_x; SYS_ARG_TYP(0) = STYP_INT;
+		SYS_ARG_INT(1) = gpu_y; SYS_ARG_TYP(1) = STYP_INT;
+		SYS_ARG_STR(2) = msg; SYS_ARG_TYP(2) = STYP_STR;
 		*(volatile int8_t *)0x1FF00286 = 3;
 		gpu_x = 1;
 		gpu_y++;
@@ -165,7 +185,7 @@ static int puts(const char *msg)
 
 	buffer_copy((char *volatile)0x1FF00200, addr_tmp, 64);
 
-	return 0; // Fuck libc
+	return 0;
 }
 
 static void __attribute__((noreturn)) panic(const char *msg)
@@ -193,18 +213,24 @@ static int string_is_equal(const char *restrict a, const char *b)
 	return a[i] == b[i];
 }
 
-static int find_device(const char *dtyp)
+static int find_device(const char *dtyp, int from)
 {
 	int i;
+	static int component_count = 0;
 
-	int component_count = *(volatile uint8_t *)0x1FF00284;
-	for(i = 0; i < component_count; i++)
+	if(from < 0)
+	{
+		component_count = *(volatile uint8_t *)0x1FF00284;
+		from = 0;
+	}
+
+	for(i = from; i < component_count; i++)
 	{
 		*(volatile uint8_t *)0x1FF00284 = i;
 		if(string_is_equal((char *volatile)0x1FF00240, dtyp))
 		{
 			// found it, now return true
-			return 1;
+			return i+1;
 		}
 	}
 
@@ -216,37 +242,40 @@ static void load_file(void *buf, const char *fname)
 {
 	int ret_count;
 
-	// open file
-	*(volatile const char **)0x1FF00280 = "open";
-	*(volatile const char **)0x1FF00300 = fname; *(volatile uint32_t *)0x1FF00304 = 4;
-	*(volatile const char **)0x1FF00308 = "r"; *(volatile uint32_t *)0x1FF0030C = 4;
+}
 
-	*(volatile int8_t *)0x1FF00286 = 2;
-	ret_count = *(volatile int8_t *)0x1FF00286;
+static int file_seek(int32_t fd_val, int32_t fd_typ, void *whence, int32_t offs)
+{
+	*(volatile char **)0x1FF00280 = "seek";
+	SYS_ARG_INT(0) = fd_val; SYS_ARG_TYP(0) = fd_typ;
+	SYS_ARG_STR(1) = whence; SYS_ARG_TYP(1) = STYP_STR;
+	SYS_ARG_INT(2) = offs; SYS_ARG_TYP(2) = STYP_INT;
+	*(volatile int8_t *)0x1FF00286 = 3;
+	int ret_count = *(volatile int8_t *)0x1FF00286;
 	if(ret_count < 1)
 	{
 		if(*(volatile char *)0x1FF002C0 != '\x00')
 			panic((const char *)0x1FF002C0);
 		else
-			panic("FILE OPEN ERROR");
+			panic("FILE READ ERROR");
 	}
 
-	int32_t fd_val = *(volatile int32_t *)0x1FF00300;
-	int32_t fd_typ = *(volatile int32_t *)0x1FF00304;
+	return (SYS_ARG_TYP(0)==8 ? (int)SYS_ARG_FLT(0) : SYS_ARG_INT(0));
+}
 
-	// read file
+static int file_read(int32_t fd_val, int32_t fd_typ, void *buf, int32_t len)
+{
 	void *p = buf;
-	uint32_t real_len = 0;
-	for(;;)
+	int32_t real_len = 0;
+	int32_t remain_len = len;
+	while(remain_len > 0)
 	{
 		*(volatile char **)0x1FF00280 = "read";
-		*(volatile int32_t *)0x1FF00300 = fd_val;
-		*(volatile int32_t *)0x1FF00304 = fd_typ;
-		*(volatile int32_t *)0x1FF00308 = 0x100000;
-		*(volatile int32_t *)0x1FF0030C = 6;
+		SYS_ARG_INT(0) = fd_val; SYS_ARG_TYP(0) = fd_typ;
+		SYS_ARG_INT(1) = remain_len; SYS_ARG_TYP(1) = STYP_INT;
 
 		*(volatile int8_t *)0x1FF00286 = 2;
-		ret_count = *(volatile int8_t *)0x1FF00286;
+		int ret_count = *(volatile int8_t *)0x1FF00286;
 		if(ret_count < 1)
 		{
 			if(*(volatile char *)0x1FF002C0 != '\x00')
@@ -255,113 +284,133 @@ static void load_file(void *buf, const char *fname)
 				panic("FILE READ ERROR");
 		}
 
-		if(*(volatile int32_t *)0x1FF00304 == 0)
+		if(SYS_ARG_TYP(0) == STYP_NUL)
 			break;
 
-		if(*(volatile int32_t *)0x1FF00304 != 4)
+		if(SYS_ARG_TYP(0) != STYP_STR)
 			panic("API FAIL");
 
-		uint32_t block_len = *(volatile uint32_t *)0x1FF00300;
+		uint32_t block_len = SYS_ARG_INT(0);
 		*(volatile void *volatile*volatile)0x1FF00288 = p;
 		*(volatile uint32_t *volatile)0x1FF0028C = block_len;
 		*(volatile uint8_t *volatile)0x1FF00287 = 0;
 		p += block_len;
 		real_len += block_len;
+		remain_len -= block_len;
 	}
 
-	puts("ELF size");
-	puthex32(real_len);
-
-	// close file
-	*(volatile char **)0x1FF00280 = "close";
-	*(volatile int32_t *)0x1FF00300 = fd_val;
-	*(volatile int32_t *)0x1FF00304 = fd_typ;
-	*(volatile int8_t *)0x1FF00286 = 1;
+	return real_len;
 }
 
-static void parse_and_run_elf(void *buf)
+static void load_parse_and_run_elf(const char *fname)
 {
+	struct ElfHeader ehdr;
 	int i, j;
 
-	puts("Started function");
-	if(((uint8_t *)buf)[0] == '\x00')
-		panic("FILE DIDN'T LOAD");
-	if(((uint8_t *)buf)[0] != '\x7F')
-		panic("FILE DIDN'T GET FIRST BYTE");
+	int from = -1;
+	for(;;)
+	{
+		// find boot device
+		from = find_device("filesystem", from);
+		if(from > 0)
+			buffer_copy(addr_bootdev, (char *volatile)0x1FF00200, 64);
+		else
+			panic("BOOT DEV FAIL");
 
-	puts("Initial ident passed");
+		puts("Boot device:");
+		puts(addr_bootdev);
+
+		// open file
+		*(volatile const char **)0x1FF00280 = "open";
+		SYS_ARG_STR(0) = fname; SYS_ARG_TYP(0) = 4;
+		SYS_ARG_STR(1) = "rb"; SYS_ARG_TYP(1) = 4;
+		*(volatile int8_t *)0x1FF00286 = 2;
+		int ret_count = *(volatile int8_t *)0x1FF00286;
+		if(ret_count < 1 || SYS_ARG_TYP(0) == 0)
+		{
+			if(*(volatile char *)0x1FF002C0 != '\x00')
+				puts((const char *)0x1FF002C0);
+			else
+				puts("FILE OPEN ERROR");
+
+			continue;
+		}
+
+		break;
+	}
+
+	int32_t fd_val = SYS_ARG_INT(0);
+	int32_t fd_typ = SYS_ARG_TYP(0);
+
+	// read header
+	if(file_read(fd_val, fd_typ, &ehdr, sizeof(struct ElfHeader)) != sizeof(struct ElfHeader))
+		panic("FILE SIZE ERROR");
+
 	for(i = 0; i < 16+8; i++)
-		if(((uint8_t *)buf)[i] != e_ident_match[i])
+		if(((uint8_t *)&ehdr)[i] != e_ident_match[i])
 			panic("ELF MAGIC FAIL");
 
 	puts("Now reading header");
-	struct ElfHeader *ehdr = (struct ElfHeader *)buf;
-	if(ehdr->e_ehsize != 0x34) panic("ELF FORMAT FAIL");
-	if(ehdr->e_phentsize != 0x20) panic("ELF FORMAT FAIL");
+	if(ehdr.e_ehsize != 0x34) panic("ELF FORMAT FAIL");
+	if(ehdr.e_phentsize != 0x20) panic("ELF FORMAT FAIL");
 
 	puts("Scanning through program headers");
-	for(i = 0; i < ehdr->e_phnum; i++)
+	for(i = 0; i < ehdr.e_phnum; i++)
 	{
-		struct ProgHeader *ph = ((struct ProgHeader *)(buf + ehdr->e_phoff + ehdr->e_phentsize))+i;
+		struct ProgHeader ph;
 
-		if(ph->p_type == 0x00000001) // PT_LOAD
+		file_seek(fd_val, fd_typ, "set", ehdr.e_phoff + ehdr.e_phentsize*i);
+		file_read(fd_val, fd_typ, &ph, sizeof(struct ProgHeader));
+
+		if(ph.p_type == 0x00000001) // PT_LOAD
 		{
-			puts("PT_LOAD found");
-			uint8_t *src = (uint8_t *)(buf + ph->p_offset);
-			uint8_t *dst = (uint8_t *)(ph->p_vaddr);
-			//puthex32(ph->p_offset); puthex32(ph->p_vaddr); puthex32(ph->p_filesz);
-			for(j = 0; j < ph->p_filesz; j++)
-				dst[j] = src[j];
-			for(; j < ph->p_memsz; j++)
+			puts("PT_LOAD");
+			uint8_t *dst = (uint8_t *)(ph.p_vaddr);
+			file_seek(fd_val, fd_typ, "set", ph.p_offset);
+			j = file_read(fd_val, fd_typ, dst, ph.p_filesz);
+			for(; j < ph.p_memsz; j++)
 				dst[j] = 0;
 		}
 	}
 
-	puts("Jumping to entry point!");
-	puthex32(ehdr->e_entry);
+	// close file
+	*(volatile char **)0x1FF00280 = "close";
+	SYS_ARG_INT(0) = fd_val; SYS_ARG_TYP(0) = fd_typ;
+	*(volatile int8_t *)0x1FF00286 = 1;
 
-	((void (*)(void))(ehdr->e_entry))();
+	puts("Jumping to entry point!");
+	puthex32(ehdr.e_entry);
+
+	// copy boot address to MMIO address
+	for(i = 0; i < 64; i++)
+		((volatile uint8_t *)0x1FF00200)[i] = addr_bootdev[i];
+
+	// boot
+	((void (*)(void))(ehdr.e_entry))();
 }
 
 static void _deleg_start(void)
 {
-	void *elf_base = (void *)0x10000;
-
 	// find GPU + screen
 	addr_screen[0] = '\x00';
 	addr_gpu[0] = '\x00';
 
-	if(find_device("screen"))
+	if(find_device("screen", -1))
 		buffer_copy(addr_screen, (char *volatile)0x1FF00200, 64);
-	if(find_device("gpu"))
+	if(find_device("gpu", -1))
 	{
 		buffer_copy(addr_gpu, (char *volatile)0x1FF00200, 64);
 		if(addr_screen[0] != '\x00')
 		{
 			*(volatile char **)0x1FF00280 = "bind";
-			*(volatile char **)0x1FF00300 = addr_gpu;
-			*(volatile uint32_t *)0x1FF00304 = 4;
+			SYS_ARG_STR(0) = addr_gpu; SYS_ARG_TYP(0) = STYP_STR;
 
 			*(volatile int8_t *)0x1FF00286 = 1;
 		}
 	}
 
-	// find boot device
-	puts("Finding boot device");
-	if(find_device("filesystem"))
-		buffer_copy(addr_bootdev, (char *volatile)0x1FF00200, 64);
-	else
-		panic("BOOT DEV FAIL");
-		
-	puts("Boot device:");
-	puts(addr_bootdev);
-
 	// load file
 	puts("Loading init.elf");
-	load_file(elf_base, "init.elf");
-
-	// parse
-	puts("Parsing");
-	parse_and_run_elf(elf_base);
+	load_parse_and_run_elf("init.elf");
 	panic("BOOT EXITED");
 }

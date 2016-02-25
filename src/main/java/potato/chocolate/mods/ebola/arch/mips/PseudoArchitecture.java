@@ -37,6 +37,7 @@ public class PseudoArchitecture implements Architecture {
             assert(ram_words >= 1);
             assert(ram_words <= (64<<18));
             vm.mips.ram = new int[ram_words];
+            vm.mips.ram_bytes = ram_words<<2;
             System.arraycopy(oldram, 0, vm.mips.ram, 0,
                     Math.min(oldram.length, vm.mips.ram.length));
         }
