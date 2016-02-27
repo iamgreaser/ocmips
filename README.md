@@ -3,8 +3,8 @@ MIPS for OpenComputers. 'Nuff said.
 Consult MemoryMap.txt for more info on how to code for this damn thing.
 
 This comes with an ELF bootloader!
-Set your start address to somewhere after the first 64KB in unmapped space
-(`-Wl,-Ttext-segment=0xA0010000` works fine), and rock on!
+Set your start address to somewhere after the first 20KB in unmapped space
+(`-Wl,-Ttext-segment=0xA0005000` works fine), and rock on!
 
 Note, the bootloader will let you use the user space as it has an identity paging handler,
 but this is not recommended.

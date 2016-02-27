@@ -14,7 +14,8 @@ public class PseudoVM {
     String addr_eeprom = null;
 
     boolean is_booted = false;
-    Jipsy mips = new Jipsy(this, 8<<10); // default to 8KB
+    Jipsy mips = new Jipsy(this, 16);
+    int sync_call_accum = 0;
 
     void bsod(String msg) {
         if(this.mips.hard_halted)
@@ -47,8 +48,13 @@ public class PseudoVM {
         this.mips.hard_halted = true;
     }
 
-    Object[] run(Object[] args) throws Exception {
+    Object run(int mode) throws Exception {
         if(!is_booted) {
+            if(mode != 0) {
+                System.out.printf("Waiting for sync call...\n");
+                return null;
+            }
+            machine.beep((short)400, (short)20);
             System.out.printf("Booting!\n");
             System.out.printf("Components: %d\n", this.machine.componentCount());
 
@@ -80,6 +86,11 @@ public class PseudoVM {
                     h = (Integer)gpuSizeO[1];
                 machine.invoke(addr_gpu, "fill", new Object[]{1, 1, w, h, " "});
                 machine.invoke(addr_gpu, "set", new Object[]{1, h, "BOOT TEST STRING"});
+            }
+
+            // Clear RAM
+            for(int i = 0; i < mips.ram.length; i++) {
+                mips.ram[i] = 0;
             }
 
             // Load EEPROM
@@ -128,27 +139,20 @@ public class PseudoVM {
             }
         }
 
-        if(args != null) {
-            // TODO: actually queue this
-            System.out.printf("Args:");
-            for(int i = 0; i < args.length; i++)
-                System.out.printf(" %s", args[i].toString());
-            System.out.printf("\n");
-        }
-
         // Run some cycles
         try {
+            if(mode == 1) return (Integer)0;
+
             if(!mips.hard_halted) {
                 // TODO: adaptive cycle count
-                mips.run_cycles(1000000/20);
+                int cycs = (mode == 0 ? 200 : 40*1000*1000/20);
+                mips.run_cycles(cycs);
                 if(mips.hard_halted){
                     bsod("Halted");
+                } else if(mips.sync_call) {
+                    return null;
                 } else if(mips.need_sleep) {
-                    // XXX: this could really be, y'know, just a single return
-                    // instead of having to create an array
-                    //
-                    // a fine case of OOP used shittily
-                    return new Object[]{(Integer)1};
+                    return (Integer)1;
                 }
             }
 
@@ -158,7 +162,7 @@ public class PseudoVM {
             e.printStackTrace();
         }
 
-	    return null;
+	    return (Integer)0;
     }
  
     void setApiFunction(String name, PseudoNativeFunction value) {

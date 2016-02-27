@@ -14,6 +14,10 @@ import li.cil.oc.api.machine.Signal;
 import li.cil.oc.api.network.Component;
 import li.cil.oc.api.network.Node;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+
 /** This is the class you implement; Architecture is from the OC API. */
 @Architecture.Name("MIPS")
 public class PseudoArchitecture implements Architecture {
@@ -44,21 +48,71 @@ public class PseudoArchitecture implements Architecture {
     }
 
     public boolean recomputeMemory(Iterable<ItemStack> components) {
+        // Get settings
+        // Yes, we have to use reflection for this
+        int[] ram_sizes = {192, 256, 384, 512, 768, 1024};
+        try {
+            Class<?> settings = Class.forName("li.cil.oc.Settings");
+            Method settings_get = settings.getMethod("get");
+            Object oget = settings_get.invoke(settings);
+            Field framsz = settings.getDeclaredField("ramSizes");
+            framsz.setAccessible(true);
+            Object oramsz = framsz.get(oget);
+            if(oramsz instanceof int[]) {
+                int[] new_ram_sizes = (int[]) oramsz;
+                if (new_ram_sizes != null) {
+                    ram_sizes = new_ram_sizes;
+                } else {
+                    System.err.printf("RAM sizes array is null - using defaults\n");
+                }
+            } else {
+                System.err.printf("RAM sizes array isn't an int[] - using defaults\n");
+            }
+        } catch(ClassNotFoundException e) {
+            System.err.printf("Could not find a class for RAM settings - using defaults\n");
+            e.printStackTrace();
+        } catch (NoSuchMethodException e) {
+            System.err.printf("Could not find a particular method for RAM settings - using defaults\n");
+            e.printStackTrace();
+        } catch (InvocationTargetException e) {
+            System.err.printf("InvocationTargetException for RAM - using defaults\n");
+            e.printStackTrace();
+        } catch (IllegalAccessException e) {
+            System.err.printf("IllegalAccessException for RAM - using defaults\n");
+            e.printStackTrace();
+        } catch (NullPointerException e) {
+            System.err.printf("NullPointerException for RAM - using defaults\n");
+            e.printStackTrace();
+        } catch (NoSuchFieldException e) {
+            System.err.printf("NoSuchFieldException for RAM - using defaults\n");
+            e.printStackTrace();
+        }
+
+        int ram_accum = 0;
+
+        // Go through RAM sticks
         for(ItemStack isk : components) {
             li.cil.oc.api.driver.Item d = Driver.driverFor(isk);
 
             if(d instanceof Memory) {
                 Memory m = (Memory)d;
-                double amt = m.amount(isk);
-                System.out.printf("Stack RAM amount: %f\n", amt);
+                double amtf = m.amount(isk);
+                int amt = ((int)Math.floor(amtf+0.5)) - 1;
+                if(amt < 0) amt = 0;
+                if(amt > ram_sizes.length - 1) amt = ram_sizes.length - 1;
+
+                int realamt = ram_sizes[amt];
+                ram_accum += realamt;
+
+                System.out.printf("Stack RAM amount: %dKB\n", realamt);
             }
         }
 
-        this.ram_words = 2<<20; // 2MB
+        System.out.printf("Total RAM amount: %dKB\n", ram_accum);
+        this.ram_words = ram_accum*1024;
 
         // just do it anyway, it's fun making computers crash
-        ram_words = (ram_words+3)>>2;
-        updateRamSize();
+        this.ram_words = (this.ram_words+3)>>2;
         return true;
     }
  
@@ -67,7 +121,6 @@ public class PseudoArchitecture implements Architecture {
         // provide to it.
         vm = new PseudoVM();
         vm.machine = machine; // Guess where you can shove your abstractions, Java.
-        updateRamSize();
         return true;
     }
  
@@ -80,37 +133,24 @@ public class PseudoArchitecture implements Architecture {
         // by passing it the next signal from the queue, but you may decide
         // to allow your VM to poll for signals manually.
         try {
-            final Signal signal;
-            /*
-            if (isSynchronizedReturn) {
-                // Don't pull signals when we're coming back from a sync call,
-                // since we're in the middle of something else!
-                signal = null;
+            final Object result;
+            if(vm != null && vm.mips != null) {
+                synchronized (vm.mips){
+                    updateRamSize();
+                }
             }
-            else {
-                signal = machine.popSignal();
-            }
-            */
-            final Object[] result;
-            /*
-            if (signal != null) {
-                result = vm.run(new Object[]{signal.name(), signal.args()});
-            }
-            else {
-            */
-                result = vm.run(null);
-            //}
- 
+            result = vm.run(isSynchronizedReturn ? 1 : 2);
+
             // You'll want to define some internal protocol by which to decide
             // when to perform a synchronized call. Let's say we expect the VM
             // to return either a number for a sleep, a boolean to indicate
             // shutdown/reboot and anything else a pending synchronous call.
             if (result != null) {
-                if (result[0] instanceof Boolean) {
-                    return new ExecutionResult.Shutdown((Boolean)result[0]);
+                if (result instanceof Boolean) {
+                    return new ExecutionResult.Shutdown((Boolean)result);
                 }
-                if (result[0] instanceof Integer) {
-                    return new ExecutionResult.Sleep((Integer)result[0]);
+                if (result instanceof Integer) {
+                    return new ExecutionResult.Sleep((Integer)result);
                 }
             }
             // If this is returned, the next 'resume' will be runSynchronized.
@@ -137,7 +177,12 @@ public class PseudoArchitecture implements Architecture {
         // makes it perform the *actual* call. For some pseudo-code handling
         // this in the VM, see below.
         try {
-            vm.run(null);
+            if(vm != null && vm.mips != null) {
+                synchronized (vm.mips){
+                    updateRamSize();
+                }
+            }
+            vm.run(0);
 	} catch (Exception e) {
             // TODO Auto-generated catch block
             e.printStackTrace();

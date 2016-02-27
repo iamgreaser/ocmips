@@ -16,8 +16,8 @@ RAM address space (PHYSICAL MEMORY):
   0x00001000-0x00001FFF = EEPROM boot space
 
 EEPROM memory map:
+  0xA0001000-0xA0001FFF = where the EEPROM is unpacked to
   0xA000????-0xA0004000 = initial stack pointer
-  0xA0010000-0x???????? = where boot.elf is unpacked to
 
 I/O:
 

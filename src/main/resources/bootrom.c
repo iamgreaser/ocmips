@@ -3,7 +3,6 @@
 #mipsel-none-elf-gcc -G0 -g -Os -fno-toplevel-reorder -fomit-frame-pointer -Wl,-Ttext-segment=0xFE8 -nostdlib -o boot.elf bootrom.c && \
 
 mipsel-none-elf-gcc -G0 -g -O1 -fno-toplevel-reorder -fomit-frame-pointer -Wl,-T,bootrom.ld -nostdlib -o boot.elf bootrom.c && \
-mipsel-none-elf-strip -R .MIPS.abiflags boot.elf && \
 mipsel-none-elf-objcopy -Obinary boot.elf boot.bin && \
 ls -l boot.* &&
 true
@@ -19,16 +18,16 @@ exit $?
 #define STYP_FLT 8
 #define STYP_HDL 10
 
-#define SYS_ARG_TYP(n) (*(volatile int32_t *)(0x1FF00304+(n)*8))
-#define SYS_ARG_INT(n) (*(volatile int32_t *)(0x1FF00300+(n)*8))
-#define SYS_ARG_FLT(n) (*(volatile float *)(0x1FF00300+(n)*8))
-#define SYS_ARG_STR(n) (*(volatile const char **)(0x1FF00300+(n)*8))
+#define SYS_ARG_TYP(n) (*(volatile int32_t *)(0xBFF00304+(n)*8))
+#define SYS_ARG_INT(n) (*(volatile int32_t *)(0xBFF00300+(n)*8))
+#define SYS_ARG_FLT(n) (*(volatile float *)(0xBFF00300+(n)*8))
+#define SYS_ARG_STR(n) (*(volatile const char **)(0xBFF00300+(n)*8))
 
 static void _deleg_start(void);
 void _start(void) {
 	asm volatile (
 		"lui $sp, 0xA000\n"
-		"ori $sp, $sp, 0xF000\n"
+		"ori $sp, $sp, 0x4000\n"
 		: : :);
 
 	// set up UTLB handler
@@ -98,12 +97,12 @@ static void putch(char c)
 	// use debug port if no GPU
 	if(addr_gpu[0] == '\x00')
 	{
-		*(volatile uint8_t *)0x1FF00004 = c;
+		*(volatile uint8_t *)0xBFF00004 = c;
 		return;
 	}
 
 	char addr_tmp[64];
-	buffer_copy(addr_tmp, (char *volatile)0x1FF00200, 64);
+	buffer_copy(addr_tmp, (char *volatile)0xBFF00200, 64);
 
 	if(c == '\n')
 	{
@@ -116,13 +115,13 @@ static void putch(char c)
 		if(gpu_x < 1) gpu_x = 1;
 
 	} else {
-		buffer_copy((char *volatile)0x1FF00200, addr_gpu, 64);
-		*(volatile char **)0x1FF00280 = "set";
+		buffer_copy((char *volatile)0xBFF00200, addr_gpu, 64);
+		*(volatile char **)0xBFF00280 = "set";
 		SYS_ARG_INT(0) = gpu_x; SYS_ARG_TYP(0) = STYP_INT;
 		SYS_ARG_INT(1) = gpu_y; SYS_ARG_TYP(1) = STYP_INT;
 		char tbuf[2]; tbuf[0] = c; tbuf[1] = '\x00';
 		SYS_ARG_STR(2) = tbuf; SYS_ARG_TYP(2) = STYP_STR;
-		*(volatile int8_t *)0x1FF00286 = 3;
+		*(volatile int8_t *)0xBFF00286 = 3;
 		gpu_x++;
 		if(gpu_x > 80)
 		{
@@ -137,7 +136,7 @@ static void putch(char c)
 		gpu_y = 1;
 	}
 
-	buffer_copy((char *volatile)0x1FF00200, addr_tmp, 64);
+	buffer_copy((char *volatile)0xBFF00200, addr_tmp, 64);
 }
 
 static int puthex32(uint32_t v)
@@ -164,15 +163,15 @@ static int puts(const char *msg)
 	}
 
 	char addr_tmp[64];
-	buffer_copy(addr_tmp, (char *volatile)0x1FF00200, 64);
+	buffer_copy(addr_tmp, (char *volatile)0xBFF00200, 64);
 
 	{
-		buffer_copy((char *volatile)0x1FF00200, addr_gpu, 64);
-		*(volatile char **)0x1FF00280 = "set";
+		buffer_copy((char *volatile)0xBFF00200, addr_gpu, 64);
+		*(volatile char **)0xBFF00280 = "set";
 		SYS_ARG_INT(0) = gpu_x; SYS_ARG_TYP(0) = STYP_INT;
 		SYS_ARG_INT(1) = gpu_y; SYS_ARG_TYP(1) = STYP_INT;
 		SYS_ARG_STR(2) = msg; SYS_ARG_TYP(2) = STYP_STR;
-		*(volatile int8_t *)0x1FF00286 = 3;
+		*(volatile int8_t *)0xBFF00286 = 3;
 		gpu_x = 1;
 		gpu_y++;
 	} 
@@ -183,7 +182,7 @@ static int puts(const char *msg)
 		gpu_y = 1;
 	}
 
-	buffer_copy((char *volatile)0x1FF00200, addr_tmp, 64);
+	buffer_copy((char *volatile)0xBFF00200, addr_tmp, 64);
 
 	return 0;
 }
@@ -220,14 +219,14 @@ static int find_device(const char *dtyp, int from)
 
 	if(from < 0)
 	{
-		component_count = *(volatile uint8_t *)0x1FF00284;
+		component_count = *(volatile uint8_t *)0xBFF00284;
 		from = 0;
 	}
 
 	for(i = from; i < component_count; i++)
 	{
-		*(volatile uint8_t *)0x1FF00284 = i;
-		if(string_is_equal((char *volatile)0x1FF00240, dtyp))
+		*(volatile uint8_t *)0xBFF00284 = i;
+		if(string_is_equal((char *volatile)0xBFF00240, dtyp))
 		{
 			// found it, now return true
 			return i+1;
@@ -238,24 +237,18 @@ static int find_device(const char *dtyp, int from)
 	return 0;
 }
 
-static void load_file(void *buf, const char *fname)
-{
-	int ret_count;
-
-}
-
 static int file_seek(int32_t fd_val, int32_t fd_typ, void *whence, int32_t offs)
 {
-	*(volatile char **)0x1FF00280 = "seek";
+	*(volatile char **)0xBFF00280 = "seek";
 	SYS_ARG_INT(0) = fd_val; SYS_ARG_TYP(0) = fd_typ;
 	SYS_ARG_STR(1) = whence; SYS_ARG_TYP(1) = STYP_STR;
 	SYS_ARG_INT(2) = offs; SYS_ARG_TYP(2) = STYP_INT;
-	*(volatile int8_t *)0x1FF00286 = 3;
-	int ret_count = *(volatile int8_t *)0x1FF00286;
+	*(volatile int8_t *)0xBFF00286 = 3;
+	int ret_count = *(volatile int8_t *)0xBFF00286;
 	if(ret_count < 1)
 	{
-		if(*(volatile char *)0x1FF002C0 != '\x00')
-			panic((const char *)0x1FF002C0);
+		if(*(volatile char *)0xBFF002C0 != '\x00')
+			panic((const char *)0xBFF002C0);
 		else
 			panic("FILE READ ERROR");
 	}
@@ -270,16 +263,16 @@ static int file_read(int32_t fd_val, int32_t fd_typ, void *buf, int32_t len)
 	int32_t remain_len = len;
 	while(remain_len > 0)
 	{
-		*(volatile char **)0x1FF00280 = "read";
+		*(volatile char **)0xBFF00280 = "read";
 		SYS_ARG_INT(0) = fd_val; SYS_ARG_TYP(0) = fd_typ;
 		SYS_ARG_INT(1) = remain_len; SYS_ARG_TYP(1) = STYP_INT;
 
-		*(volatile int8_t *)0x1FF00286 = 2;
-		int ret_count = *(volatile int8_t *)0x1FF00286;
+		*(volatile int8_t *)0xBFF00286 = 2;
+		int ret_count = *(volatile int8_t *)0xBFF00286;
 		if(ret_count < 1)
 		{
-			if(*(volatile char *)0x1FF002C0 != '\x00')
-				panic((const char *)0x1FF002C0);
+			if(*(volatile char *)0xBFF002C0 != '\x00')
+				panic((const char *)0xBFF002C0);
 			else
 				panic("FILE READ ERROR");
 		}
@@ -291,9 +284,9 @@ static int file_read(int32_t fd_val, int32_t fd_typ, void *buf, int32_t len)
 			panic("API FAIL");
 
 		uint32_t block_len = SYS_ARG_INT(0);
-		*(volatile void *volatile*volatile)0x1FF00288 = p;
-		*(volatile uint32_t *volatile)0x1FF0028C = block_len;
-		*(volatile uint8_t *volatile)0x1FF00287 = 0;
+		*(volatile void *volatile*volatile)0xBFF00288 = p;
+		*(volatile uint32_t *volatile)0xBFF0028C = block_len;
+		*(volatile uint8_t *volatile)0xBFF00287 = 0;
 		p += block_len;
 		real_len += block_len;
 		remain_len -= block_len;
@@ -313,7 +306,7 @@ static void load_parse_and_run_elf(const char *fname)
 		// find boot device
 		from = find_device("filesystem", from);
 		if(from > 0)
-			buffer_copy(addr_bootdev, (char *volatile)0x1FF00200, 64);
+			buffer_copy(addr_bootdev, (char *volatile)0xBFF00200, 64);
 		else
 			panic("BOOT DEV FAIL");
 
@@ -321,15 +314,15 @@ static void load_parse_and_run_elf(const char *fname)
 		puts(addr_bootdev);
 
 		// open file
-		*(volatile const char **)0x1FF00280 = "open";
+		*(volatile const char **)0xBFF00280 = "open";
 		SYS_ARG_STR(0) = fname; SYS_ARG_TYP(0) = 4;
 		SYS_ARG_STR(1) = "rb"; SYS_ARG_TYP(1) = 4;
-		*(volatile int8_t *)0x1FF00286 = 2;
-		int ret_count = *(volatile int8_t *)0x1FF00286;
+		*(volatile int8_t *)0xBFF00286 = 2;
+		int ret_count = *(volatile int8_t *)0xBFF00286;
 		if(ret_count < 1 || SYS_ARG_TYP(0) == 0)
 		{
-			if(*(volatile char *)0x1FF002C0 != '\x00')
-				puts((const char *)0x1FF002C0);
+			if(*(volatile char *)0xBFF002C0 != '\x00')
+				puts((const char *)0xBFF002C0);
 			else
 				puts("FILE OPEN ERROR");
 
@@ -374,16 +367,16 @@ static void load_parse_and_run_elf(const char *fname)
 	}
 
 	// close file
-	*(volatile char **)0x1FF00280 = "close";
+	*(volatile char **)0xBFF00280 = "close";
 	SYS_ARG_INT(0) = fd_val; SYS_ARG_TYP(0) = fd_typ;
-	*(volatile int8_t *)0x1FF00286 = 1;
+	*(volatile int8_t *)0xBFF00286 = 1;
 
 	puts("Jumping to entry point!");
 	puthex32(ehdr.e_entry);
 
 	// copy boot address to MMIO address
 	for(i = 0; i < 64; i++)
-		((volatile uint8_t *)0x1FF00200)[i] = addr_bootdev[i];
+		((volatile uint8_t *)0xBFF00200)[i] = addr_bootdev[i];
 
 	// boot
 	((void (*)(void))(ehdr.e_entry))();
@@ -396,16 +389,16 @@ static void _deleg_start(void)
 	addr_gpu[0] = '\x00';
 
 	if(find_device("screen", -1))
-		buffer_copy(addr_screen, (char *volatile)0x1FF00200, 64);
+		buffer_copy(addr_screen, (char *volatile)0xBFF00200, 64);
 	if(find_device("gpu", -1))
 	{
-		buffer_copy(addr_gpu, (char *volatile)0x1FF00200, 64);
+		buffer_copy(addr_gpu, (char *volatile)0xBFF00200, 64);
 		if(addr_screen[0] != '\x00')
 		{
-			*(volatile char **)0x1FF00280 = "bind";
+			*(volatile char **)0xBFF00280 = "bind";
 			SYS_ARG_STR(0) = addr_gpu; SYS_ARG_TYP(0) = STYP_STR;
 
-			*(volatile int8_t *)0x1FF00286 = 1;
+			*(volatile int8_t *)0xBFF00286 = 1;
 		}
 	}
 

@@ -29,6 +29,7 @@ public class Jipsy {
     private int reset_pc = 0x00001000;
     boolean hard_halted = false;
     boolean need_sleep = false;
+    boolean sync_call = false;
 
     public static final int EX_Int = 0x00; // Interrupt
     public static final int EX_Mod = 0x01; // TLB modification exception
@@ -55,6 +56,7 @@ public class Jipsy {
 
     private PseudoVM vm;
     static final int OUTBUF_LEN = 1;
+    private boolean interrupt_ready;
 
     Map<AbstractValue, Integer> io_handlemap = new HashMap<AbstractValue, Integer>();
     Map<Integer, AbstractValue> io_handlemap_rev = new HashMap<Integer, AbstractValue>();
@@ -78,6 +80,8 @@ public class Jipsy {
     int cmp_call_retlen = 0;
     private boolean double_fault_detect = false;
     private boolean pf0_double_fault_detect = false;
+    private int pf0_fault = -1;
+    private int pf0_fault_pc = 0;
     private int bd_detect = -1;
 
     public void use_cycles(int count)
@@ -385,7 +389,11 @@ public class Jipsy {
         // cap it here
         while(len < 65536)
         {
-            byte b = mem_read_8(addr_ + len);
+            // stop if we aren't even in memory
+            if(((addr_ + len) & 0x1FFFFFFF) >= this.ram_bytes)
+                break;
+
+            byte b = mem_read_8((addr_ + len) & 0x1FFFFFFF);
             this.cycles += 1;
             if(b == 0) break;
             bfp.write(0xFF&(int)b);
@@ -598,27 +606,38 @@ public class Jipsy {
                         } catch(LimitReachedException e) {
                             // jump back to here
                             // FIXME: BLATANT HACK
-                            System.err.printf("limit reached - restarting call\n");
+                            //System.err.printf("%08X: limit reached: %s -> %s.\n", this.op_pc, address, method_name);
                             this.pc = this.op_pc;
                             this.pf0_pc = this.pc;
                             this.pf0 = 0x00000000; // NOP
                             this.need_sleep = true;
+                            this.sync_call = true;
                             return;
                         }
+                        //System.err.printf("%08X: call succeeded: %s -> %s.\n", this.op_pc, address, method_name);
 
                         this.cmp_call_retcnt = (rets == null ? 0 : rets.length);
                         for (int i = 0; i < this.cmp_call_retcnt; i++) {
                             parse_retval(i, rets[i]);
                         }
                     } catch(Exception e) {
+                        //System.err.printf("%08X: call failed: %s.\n", this.op_pc, e.getMessage());
                         //System.err.printf("exception!\n");
                         //e.printStackTrace();
                         String err = e.getMessage();
+                        if(err == null) err = e.toString();
+                        if(err == null) err = "(null?)";
                         byte[] b = err.getBytes();
                         System.arraycopy(b, 0, this.cmp_buf_error, 0, Math.min(63, b.length));
                         this.cmp_buf_error[Math.min(63, b.length)] = 0;
                         this.cmp_buf_error[63] = 0;
                         this.cmp_call_retcnt = -1;
+                    }
+
+                    // Sleep if that was a sync call
+                    if(this.sync_call) {
+                        this.need_sleep = true;
+                        this.sync_call = false;
                     }
                     return;
                 }
@@ -635,6 +654,12 @@ public class Jipsy {
                             this.cmp_call_retarray[data_].length); i++)
                     {
                         // lop off top few bits for convenience
+
+                        // stop if we aren't even in memory
+                        if(((this.cmp_call_retptr+i) & 0x1FFFFFFF) >= this.ram_bytes)
+                            break;
+
+                        // write
                         this.mem_write_8((this.cmp_call_retptr+i) & 0x1FFFFFFF, this.cmp_call_retarray[data_][i]);
                         this.cycles += 1;
                     }
@@ -670,6 +695,7 @@ public class Jipsy {
         int expect_ehi = (addr_&~0xFFF)|(c0_entryhi&0xFC0);
 
         // Read TLB
+        // FIXME: need to fire TLB exception instead of UTLB exception if matching but not valid
         for(int i = 0, idx = tlb_entry_most_recent; i < 64; i++, idx = tlb_entries[idx][2]) {
             // Fetch TLB entry
             int elo = tlb_entries[idx][0]; // physical + flags
@@ -712,7 +738,7 @@ public class Jipsy {
         if((addr_ & 0x80000000) == 0) {
             return remap_tlb(addr_, is_write);
 
-        } else if((c0_status & (1<<0)) != 0) {
+        } else if((c0_status & (0x02)) != 0) {
             // user mode does NOT have access to here
             c0_vaddr = addr_;
             return -1-EX_AdEL;
@@ -732,6 +758,23 @@ public class Jipsy {
         }
     }
 
+    private int remap_address_phys(int addr_, boolean is_write) {
+        // check if in I/O space
+        if ((addr_ & 0xFFF00000) == 0x1FF00000)
+            return addr_;
+
+        // do some basic RAM remaps
+        if ((addr_ & 0xFFFFF000) == 0x1FC00000)
+            addr_ = (addr_ & 0xFFF) | 0x00000000;
+
+        // check if in RAM range
+        if (addr_ < this.ram_bytes)
+            return addr_;
+
+        // fault!
+        return -1 - EX_DBE;
+    }
+
     private int remap_address(int addr_, boolean is_write)
     {
         // get address
@@ -741,24 +784,14 @@ public class Jipsy {
         if(addr_ < 0)
             return addr_;
 
-        // check if in I/O space
-        if((addr_ & 0xFFF00000) == 0x1FF00000)
-            return addr_;
-
-        // do some basic RAM remaps
-        if((addr_ & 0xFFFFF000) == 0x1FC00000)
-            addr_ = (addr_ & 0xFFF) | 0x00000000;
-
-        // check if in RAM range
-        if(addr_ < this.ram_bytes)
-            return addr_;
-
-        // fault!
-        return -1-EX_DBE;
+        // return physical remapping
+        return remap_address_phys(addr_, is_write);
     }
 
     private void isr(int fault, int ce)
     {
+        this.pf0_fault = -1;
+
         if(this.double_fault_detect)
             throw new RuntimeException(String.format("2xfault 0x%02X @ %08X"
                     ,(this.c0_cause>>2)&15
@@ -769,8 +802,8 @@ public class Jipsy {
 
         int bd = (this.bd_detect==this.op_pc?1:0);
 
-        this.c0_cause = (this.c0_cause & ~0xB000003C)
-                | ((fault&15)<<2)
+        this.c0_cause = (this.c0_cause & ~0xB000007C)
+                | ((fault&31)<<2)
                 | ((bd&1)<<31)
                 | ((ce&3)<<28)
                 ;
@@ -793,52 +826,75 @@ public class Jipsy {
         this.pf0_pc = this.pc;
         this.pf0 = 0x00000000; // NOP
 
-        /*
-        System.err.printf("FAULT: C=%08X SR=%08X EPC=%08X PC=%08X\n"
-            , this.c0_cause, this.c0_status, this.c0_epc, this.pc);
-        if(bd != 0)
-            System.err.printf("BRANCH DELAY FAULT\n");
-        */
+        if(false) {
+            // Fault debugging message
+            System.err.printf("FAULT: C=%08X SR=%08X EPC=%08X PC=%08X\n"
+                    , this.c0_cause, this.c0_status, this.c0_epc, this.pc);
+            //if(bd != 0) System.err.printf("BRANCH DELAY FAULT\n");
+            this.need_sleep = true; // Don't spam the console
+        }
 
-        this.need_sleep = true;
         this.bd_detect = -1;
     }
 
-    public void run_op()
+    public synchronized void run_op()
     {
+        // Handle fault when ready
+        if(pf0_fault != -1) {
+            this.op_pc = pf0_fault_pc;
+            this.isr(pf0_fault, 0);
+            return;
+        }
+
         // Update PC address
         int op = this.pf0;
         int pc = this.pf0_pc;
         this.op_pc = pc;
 
+        // Check if interrupt ready
+        if(interrupt_ready) {
+            interrupt_ready = false;
+
+            // Check validity of request
+            if((c0_status & 0x01) != 0) {
+                if((c0_status & c0_cause & 0x0000FF00) != 0) {
+                    // Fire interrupt!
+                    this.isr(EX_Int, 0);
+                    return;
+                }
+            }
+        }
+
         // Get expected PC address
         int phys_pc = this.remap_address(this.pc, false);
 
         if(phys_pc < 0) {
+            // Delegate to next op
             int fault = -phys_pc-1;
             if(fault == EX_DBE) fault = EX_IBE;
-            this.isr(fault, 0);
-            return;
+            this.pf0_fault = fault;
+            this.pf0_fault_pc = this.pc;
+        } else {
+            // FIXME: clear bd_detect once branched
+            // here's a case where it'll break:
+            //     b L0
+            // L0: addiu $v0, $v0, 1
+            //
+            // if an interrupt fires on the second execution of addiu and cancels the op,
+            // it will jump back to the branch and add 3 total,
+            // instead of the expected 2.
+            //
+            // another case is if you manage to somehow wrap the whole entire address space
+            // and remove the branch,
+            // but thankfully that's not actually possible.
+
+            // Fetch
+            int new_op = this.mem_read_32(phys_pc);
+            this.pf0 = new_op;
+            this.pf0_pc = this.pc;
+            this.pc += 4;
         }
 
-        // FIXME: clear bd_detect once branched
-        // here's a case where it'll break:
-        //     b L0
-        // L0: addiu $v0, $v0, 1
-        //
-        // if an interrupt fires on the second execution of addiu and cancels the op,
-        // it will jump back to the branch and add 3 total,
-        // instead of the expected 2.
-        //
-        // another case is if you manage to somehow wrap the whole entire address space
-        // and remove the branch,
-        // but thankfully that's not actually possible.
-
-        // Fetch
-        int new_op = this.mem_read_32(phys_pc);
-        this.pf0 = new_op;
-        this.pf0_pc = this.pc;
-        this.pc += 4;
         this.cycles += 1;
 
         //System.err.printf("PC = %08X -> %08X - op = %08X", this.pc, phys_pc, new_op);
@@ -1154,7 +1210,7 @@ public class Jipsy {
             case 0x12: // COP2
             case 0x13: // COP3
                 // Check if coprocessor enabled
-                if(((otyp0&3) != 0 || (c0_status&(1<<1)) != 0)
+                if(((otyp0&3) != 0 || (c0_status&0x02) != 0)
                         && 0 != (c0_status&(1<<(28+(otyp0&3))))) { // LISP poster-child in Java
                     this.isr(EX_CpU, otyp0&3);
                     return;
@@ -1182,12 +1238,13 @@ public class Jipsy {
                         // but this is out of range.
                         tlb_entries[(c0_index>>8)&63][0] = c0_entrylo;
                         tlb_entries[(c0_index>>8)&63][1] = c0_entryhi;
+                        touch_tlb((c0_index>>8)&63);
                     } break;
 
                     case 0x06: {
                         // TLBWR
-                        // use most rarely touched one
-                        // TODO: detect TLB match
+                        // use least recently touched one
+                        // TODO: detect TLB match prior to adding this in
                         int i, idx;
                         for(i=0, idx=tlb_entries[tlb_entry_most_recent][3]; i < 64; i++)
                         {
@@ -1196,7 +1253,7 @@ public class Jipsy {
                                 // touch and go
                                 tlb_entries[idx][0] = c0_entrylo;
                                 tlb_entries[idx][1] = c0_entryhi;
-                                System.out.printf("TLBWR: %02X %08X <- %08X\n", idx, c0_entrylo, c0_entryhi);
+                                //System.out.printf("TLBWR: %02X %08X <- %08X\n", idx, c0_entrylo, c0_entryhi);
                                 touch_tlb(idx);
                                 break;
                             }
@@ -1224,6 +1281,7 @@ public class Jipsy {
 
                     case 0x10: // RFE
                         c0_status = (c0_status & ~0x0F) | ((c0_status>>2) & 0x0F);
+                        interrupt_ready = true;
                         break;
 
                     default:
@@ -1295,6 +1353,7 @@ public class Jipsy {
                             case 12: // Status
                                 tmp1 = 0x1040FF3F;
                                 c0_status = (c0_status & ~tmp1) | (tmp0 & tmp1);
+                                interrupt_ready = true;
                                 break;
 
                             case 13: // Cause
@@ -1302,6 +1361,7 @@ public class Jipsy {
                                 // This requests an interrupt.
                                 tmp1 = 0x00000300;
                                 c0_cause = (c0_cause & ~tmp1) | (tmp0 & tmp1);
+                                interrupt_ready = true;
                                 break;
 
                             case 14: // EPC
@@ -1383,8 +1443,8 @@ public class Jipsy {
                 if(tmp1 >= 0 && (tmp1&1) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
                 if(tmp1 < 0) {
                     int fault = -tmp1-1;
-                    this.c0_cause = (this.c0_cause & ~0x3C) | ((fault<<2)&15);
-                    throw new RuntimeException(String.format("LHU fault 0x%02X", fault));
+                    this.isr(fault, 0);
+                    return;
                 }
                 tmp0 = 0xFFFF&((int)(this.mem_read_16(tmp1)));
                 if(rt != 0) this.regs[rt] = tmp0;
@@ -1518,7 +1578,7 @@ public class Jipsy {
         this.double_fault_detect = next_double_fault;
     }
 
-    public void run_cycles(int ccount)
+    public synchronized void run_cycles(int ccount)
     {
         assert(ccount > 0);
         assert(ccount < 0x40000000);

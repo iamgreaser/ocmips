@@ -733,9 +733,41 @@ ssize_t read(int fd, void *buf, size_t amt)
 
 off_t lseek(int fd, off_t offset, int whence)
 {
-	// TODO!
-	//char sbuf[512]; sprintf(sbuf, "lseek = %i, off = %i, whence = %i\n", fd, offset, whence); write(1, sbuf, strlen(sbuf));
-	return offset;
+	if(fd < 3) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	// check if we have this fd
+	int idx = (fd-3);
+	int sidx = idx % FILE_MAX;
+	if(fs_open_index[sidx] != idx)
+	{
+		errno = EINVAL;
+		return -1;
+	}
+
+	// seek
+	char addr_tmp[64];
+	memcpy(addr_tmp, (uint8_t *)0xBFF00200, 64);
+	strncpy((uint8_t *)0xBFF00200, fs_open_address[sidx], 64);
+	*(volatile char **)0xBFF00280 = "seek";
+	SYS_ARG_INT(0) = idx; SYS_ARG_TYP(0) = fs_fdtyp;
+	SYS_ARG_STR(1) = (whence == SEEK_SET ? "set" : whence == SEEK_END ? "end" : "cur");
+		SYS_ARG_TYP(1) = STYP_STR;
+	SYS_ARG_INT(2) = offset; SYS_ARG_TYP(2) = STYP_INT;
+	*(volatile uint8_t *)0xBFF00286 = 3;
+
+	int retcnt = *(volatile uint8_t *)0xBFF00286;
+	if(retcnt < 1)
+	{
+		memcpy((uint8_t *)0xBFF00200, addr_tmp, 64);
+		errno = EPIPE; // not sure what the error *really* is
+		return -1;
+	}
+
+	// return offset
+	return SYS_ARG_INT(0);
 }
 
 int isatty(int fd)
