@@ -34,6 +34,11 @@ TODO: work out how to handle stdin
 0xBFF00020  W W   = sleep for x milliseconds
 0xBFF00020 R  W   = read wall clock measured in microseconds
 0xBFF00024 R  W   = read wall clock measured in microseconds>>20
+0xBFF00024  W   B = clear timer interrupt on IRQ0
+0xBFF00025  W   B = set up timer interrupt:
+  - 0 = disabled
+  - 1 = 20Hz
+  - anything else is reserved.
 
 0xBFF00200 RW   B = component address
 0xBFF0023E ^^^^^^ = end of component address

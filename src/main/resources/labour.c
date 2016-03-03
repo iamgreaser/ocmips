@@ -62,10 +62,10 @@ int kb_inbuf_flushed = 0;
 char kb_inbuf[KB_BUF_MAX];
 
 #define DRIVE_MAX 32
-#define FILE_MAX 128
-char *fs_address[DRIVE_MAX];
-char *fs_mount_point[DRIVE_MAX];
-char *fs_open_address[FILE_MAX];
+#define FILE_MAX 32
+char fs_address[DRIVE_MAX][40];
+char fs_mount_point[DRIVE_MAX][40];
+char fs_open_address[FILE_MAX][40];
 int fs_open_index[FILE_MAX];
 int fs_fdtyp = 0;
 
@@ -115,7 +115,7 @@ int lookup_mount_path(const char *inpath, const char **outaddr, const char **out
 	// Scan mount table
 	for(i = 0; i < DRIVE_MAX; i++)
 	{
-		if(fs_address[i] != NULL && fs_mount_point[i] != NULL)
+		if(fs_address[i][0] != 0 && fs_mount_point[i][0] != 0)
 		{
 			int mplen = strlen(fs_mount_point[i]);
 
@@ -246,12 +246,18 @@ ssize_t get_abs_correct_path(char *dst, const char *src, const char *cwd, size_t
 
 int mount_filesystem(const char *address, const char *path)
 {
+	// Ensure path + address are small enough
+	if(strlen(address) > 39 || strlen(path) > 39)
+	{
+		errno = E2BIG;
+		return -1;
+	}
 	// Find a free slot
 	int fsidx;
 
 	for(fsidx = 0; fsidx < DRIVE_MAX; fsidx++)
 	{
-		if(fs_address[fsidx] == NULL)
+		if(fs_address[fsidx][0] == 0)
 			break;
 	}
 
@@ -262,13 +268,11 @@ int mount_filesystem(const char *address, const char *path)
 	}
 
 	// Set mount point + address
-	if(fs_address[fsidx] != NULL)
-		free(fs_address[fsidx]);
-	fs_address[fsidx] = strdup(address);
+	strncpy(fs_address[fsidx], address, 39);
+	fs_address[fsidx][39] = 0;
 
-	if(fs_mount_point[fsidx] != NULL)
-		free(fs_mount_point[fsidx]);
-	fs_mount_point[fsidx] = strdup(path);
+	strncpy(fs_mount_point[fsidx], path, 39);
+	fs_mount_point[fsidx][39] = 0;
 
 	// All done!
 	return 0;
@@ -283,7 +287,7 @@ int mclib_gpu_get_resolution(int *w, int *h)
 	*(volatile uint8_t *)0xBFF00286 = 0;
 	memcpy((uint8_t *)0xBFF00200, addr_tmp, 64);
 
-	if(*(volatile uint8_t *)0xBFF00286 < 2)
+	if(*(volatile int8_t *)0xBFF00286 < 2)
 		return -1;
 	if(SYS_ARG_TYP(0) != 6)
 		return -1;
@@ -292,6 +296,25 @@ int mclib_gpu_get_resolution(int *w, int *h)
 
 	*w = SYS_ARG_INT(0);
 	*h = SYS_ARG_INT(1);
+
+	return 0;
+}
+
+int mclib_gpu_set_resolution(int w, int h)
+{
+	char addr_tmp[64];
+	memcpy(addr_tmp, (uint8_t *)0xBFF00200, 64);
+	memcpy((uint8_t *)0xBFF00200, gpu_address, 64);
+	*(volatile char *volatile*volatile)0xBFF00280 = "setResolution";
+	SYS_ARG_INT(0) = w;
+	SYS_ARG_TYP(0) = STYP_INT;
+	SYS_ARG_INT(1) = h;
+	SYS_ARG_TYP(1) = STYP_INT;
+	*(volatile uint8_t *)0xBFF00286 = 2;
+	memcpy((uint8_t *)0xBFF00200, addr_tmp, 64);
+
+	if(*(volatile int8_t *)0xBFF00286 < 0)
+		return -1;
 
 	return 0;
 }
@@ -513,7 +536,7 @@ int open(const char *pathname, int flags, ...)
 	ssize_t plen = get_abs_correct_path(path_tmp, pathname, "/", 256);
 	if(plen < 0)
 	{
-		perror("get_abs_correct_path");
+		//perror("get_abs_correct_path");
 
 	} else {
 		const char *outaddr;
@@ -521,7 +544,7 @@ int open(const char *pathname, int flags, ...)
 		//printf("mount path: \"%s\"\n", path_tmp);
 		if(lookup_mount_path(path_tmp, &outaddr, &outpath) < 0)
 		{
-			perror("lookup_mount_path");
+			//perror("lookup_mount_path");
 
 		} else {
 			memcpy((uint8_t *)0xBFF00200, outaddr, 64);
@@ -529,7 +552,7 @@ int open(const char *pathname, int flags, ...)
 			SYS_ARG_STR(0) = outpath; SYS_ARG_TYP(0) = STYP_STR;
 			SYS_ARG_STR(1) = acc_flags; SYS_ARG_TYP(1) = STYP_STR;
 			*(volatile uint8_t *)0xBFF00286 = 2;
-			int retcnt = *(volatile uint8_t *)0xBFF00286;
+			int retcnt = *(volatile int8_t *)0xBFF00286;
 			if(retcnt < 1)
 			{
 				errno = EACCES;
@@ -556,7 +579,8 @@ int open(const char *pathname, int flags, ...)
 				fs_fdtyp = SYS_ARG_TYP(0);
 				retcode = SYS_ARG_INT(0);
 				fs_open_index[retcode % FILE_MAX] = retcode;
-				fs_open_address[retcode % FILE_MAX] = strdup(outaddr);
+				strncpy(fs_open_address[retcode % FILE_MAX], outaddr, 39);
+				fs_open_address[retcode % FILE_MAX][39] = 0;
 				retcode += 3;
 			}
 
@@ -856,8 +880,7 @@ int close(int fd)
 
 	// free stuff
 	fs_open_index[sidx] = 0;
-	free(fs_open_address[sidx]);
-	fs_open_address[sidx] = NULL;
+	fs_open_address[sidx][0] = 0;
 
 	return 0;
 }

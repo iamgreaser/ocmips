@@ -57,6 +57,8 @@ public class Jipsy {
     private PseudoVM vm;
     static final int OUTBUF_LEN = 1;
     private boolean interrupt_ready;
+    private boolean interrupt_timer_enabled = false;
+    private long interrupt_timer_next = 0;
 
     Map<AbstractValue, Integer> io_handlemap = new HashMap<AbstractValue, Integer>();
     Map<Integer, AbstractValue> io_handlemap_rev = new HashMap<Integer, AbstractValue>();
@@ -450,6 +452,12 @@ public class Jipsy {
                 this.cmp_arg_typ_list[(addr_ >> 3) & 31][(addr_ >> 2) & 1] = data_;
 
             switch (addr_ & 0xFFFFF) {
+                case 0x00020:
+                    // sleep strobe
+                    // TODO: get correct sleep time
+                    this.need_sleep = true;
+                    return;
+
                 case 0x00280:
                     this.cmp_method_ptr = data_;
                     return;
@@ -519,11 +527,34 @@ public class Jipsy {
                     }
                     return;
 
-                case 0x00020:
-                    // sleep strobe
-                    // TODO: get correct sleep time
-                    this.need_sleep = true;
-                    break;
+                case 0x00024:
+                    c0_cause &= ~(1<<10);
+                    long tnew = System.currentTimeMillis();
+                    if ((tnew - interrupt_timer_next) >= 0) {
+                        c0_cause |= (1 << 10);
+
+                        interrupt_ready = true;
+                        interrupt_timer_next += 1000 / 20;
+                        //System.out.printf("timer interrupt refired - status=%08X, cause=%08X\n", c0_status, c0_cause);
+
+                        // don't buffer too many ticks
+                        if ((tnew - interrupt_timer_next) >= 2000) {
+                            interrupt_timer_next = tnew + 1000 / 20;
+                        }
+                    }
+                    return;
+
+                case 0x00025:
+                    if(data_ == 0) {
+                        interrupt_timer_enabled = false;
+                        c0_cause &= ~(1<<10);
+                        //System.out.printf("timer interrupt stopped - status=%08X, cause=%08X\n", c0_status, c0_cause);
+                    } else if(data_ == 1) {
+                        interrupt_timer_enabled = true;
+                        interrupt_timer_next = System.currentTimeMillis() + 1000 / 20;
+                        //System.out.printf("timer interrupt started - status=%08X, cause=%08X\n", c0_status, c0_cause);
+                    }
+                    return;
 
                 case 0x00284: {
                     // component search strobe
@@ -814,7 +845,8 @@ public class Jipsy {
                 | 0x0
                 ;
 
-        c0_context = (c0_context & 0xFF800000) | ((c0_vaddr>>>12) & 0x0007FFFF);
+        c0_context = (c0_context & 0xFF800000) | ((c0_vaddr>>>10) & 0x0007FFFC);
+        c0_entryhi = (c0_entryhi & 0x00000FFF) | (c0_vaddr & 0xFFFFF000);
 
         boolean is_utlb_miss = (
                 (fault == EX_TLBL || fault == EX_TLBS)
@@ -957,8 +989,14 @@ public class Jipsy {
             case 0x10: // MFHI
                 if(rd != 0) this.regs[rd] = this.rhi;
                 break;
+            case 0x11: // MTHI
+                this.rhi = this.regs[rd];
+                break;
             case 0x12: // MFLO
                 if(rd != 0) this.regs[rd] = this.rlo;
+                break;
+            case 0x13: // MTLO
+                this.rlo = this.regs[rs];
                 break;
 
             case 0x18: // MULT
@@ -1211,180 +1249,252 @@ public class Jipsy {
             case 0x13: // COP3
                 // Check if coprocessor enabled
                 if(((otyp0&3) != 0 || (c0_status&0x02) != 0)
-                        && 0 != (c0_status&(1<<(28+(otyp0&3))))) { // LISP poster-child in Java
+                        && 0 == (c0_status&(1<<(28+(otyp0&3))))) { // LISP poster-child in Java
                     this.isr(EX_CpU, otyp0&3);
                     return;
                 }
 
                 // No, these aren't supported either
-                if((otyp0&3) != 0) {
+                if((otyp0&3) > 1) {
                     this.isr(EX_CpU, otyp0&3);
                     return;
                 }
 
-                // Check op type
-                if(rs >= 16) switch(otyp1){
-                    case 0x01: {
-                        // TLBR
-                        c0_entrylo = tlb_entries[(c0_index>>8)&63][0];
-                        c0_entryhi = tlb_entries[(c0_index>>8)&63][1];
-                    } break;
+                if((otyp0&3) == 0) {
+                    // Check op type
+                    if (rs >= 16) switch (otyp1) {
+                        case 0x01: {
+                            // TLBR
+                            c0_entrylo = tlb_entries[(c0_index >> 8) & 63][0];
+                            c0_entryhi = tlb_entries[(c0_index >> 8) & 63][1];
+                        }
+                        break;
 
-                    case 0x02: {
-                        // TLBWI
-                        // TODO: detect TLB match and set TLB Shutdown flag
-                        // allegedly this is optional but potentially dangerous without it
-                        // MIPS32 also defines a machine check exception @ 0x18,
-                        // but this is out of range.
-                        tlb_entries[(c0_index>>8)&63][0] = c0_entrylo;
-                        tlb_entries[(c0_index>>8)&63][1] = c0_entryhi;
-                        touch_tlb((c0_index>>8)&63);
-                    } break;
+                        case 0x02: {
+                            // TLBWI
+                            // TODO: detect TLB match and set TLB Shutdown flag
+                            // allegedly this is optional but potentially dangerous without it
+                            // MIPS32 also defines a machine check exception @ 0x18,
+                            // but this is out of range.
+                            tlb_entries[(c0_index >> 8) & 63][0] = c0_entrylo;
+                            tlb_entries[(c0_index >> 8) & 63][1] = c0_entryhi;
+                            touch_tlb((c0_index >> 8) & 63);
+                        }
+                        break;
 
-                    case 0x06: {
-                        // TLBWR
-                        // use least recently touched one
-                        // TODO: detect TLB match prior to adding this in
-                        int i, idx;
-                        for(i=0, idx=tlb_entries[tlb_entry_most_recent][3]; i < 64; i++)
-                        {
-                            // is this TLB unwired?
-                            if(idx >= 8) {
-                                // touch and go
-                                tlb_entries[idx][0] = c0_entrylo;
-                                tlb_entries[idx][1] = c0_entryhi;
-                                //System.out.printf("TLBWR: %02X %08X <- %08X\n", idx, c0_entrylo, c0_entryhi);
-                                touch_tlb(idx);
-                                break;
+                        case 0x06: {
+                            // TLBWR
+                            // use least recently touched one
+                            // TODO: detect TLB match prior to adding this in
+                            int i, idx;
+                            for (i = 0, idx = tlb_entries[tlb_entry_most_recent][3]; i < 64; i++) {
+                                // is this TLB unwired?
+                                if (idx >= 8) {
+                                    // touch and go
+                                    tlb_entries[idx][0] = c0_entrylo;
+                                    tlb_entries[idx][1] = c0_entryhi;
+                                    //System.out.printf("TLBWR: %02X %08X <- %08X\n", idx, c0_entrylo, c0_entryhi);
+                                    touch_tlb(idx);
+                                    break;
+                                }
+
+                                // step back
+                                idx = tlb_entries[idx][3];
+                                this.cycles += 1;
                             }
 
-                            // step back
-                            idx=tlb_entries[idx][3];
-                            this.cycles += 1;
+                            if (i >= 64) {
+                                // well, shit.
+                                throw new RuntimeException("BUG: TLB chain has no unwired pages?!");
+                            }
                         }
-
-                        if(i >= 64) {
-                            // well, shit.
-                            throw new RuntimeException("BUG: TLB chain has no unwired pages?!");
-                        }
-                    } break;
-
-                    case 0x08: {
-                        // TLBP
-                        int fault = remap_tlb(c0_entryhi, false);
-                        if(fault >= 0) {
-                            c0_index = this.tlb_entry_most_recent<<8;
-                        } else {
-                            c0_index = 0x80000000;
-                        }
-                    } break;
-
-                    case 0x10: // RFE
-                        c0_status = (c0_status & ~0x0F) | ((c0_status>>2) & 0x0F);
-                        interrupt_ready = true;
                         break;
 
-                    default:
-                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                        this.isr(EX_RI, 0); // CU is only defined for EX_CpU
-                        return;
-
-                } else switch(rs) {
-                    case 0: // MFCn
-                        switch(rd) {
-                            case 0: // TLB index
-                                tmp0 = c0_index;
-                                break;
-                            case 1: // TLB random index
-                                tmp0 = ((int)(Math.random()*(64-8)+8))<<8;
-                                break;
-                            case 2: // TLB entrylo (phys + flags)
-                                tmp0 = c0_entrylo;
-                                break;
-                            case 4: // Context + bad virtual address
-                                tmp0 = c0_context;
-                                break;
-                            case 8: // Bad virtual address
-                                tmp0 = c0_vaddr;
-                                break;
-                            case 10: // TLB entryhi (virt + ASID)
-                                tmp0 = c0_entryhi;
-                                break;
-                            case 12: // SR
-                                tmp0 = c0_status;
-                                break;
-                            case 13: // Cause
-                                tmp0 = c0_cause;
-                                break;
-                            case 14: // EPC
-                                tmp0 = c0_epc;
-                                break;
-                            default:
-                                System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                                this.isr(EX_RI, 0);
-                                return;
+                        case 0x08: {
+                            // TLBP
+                            int fault = remap_tlb(c0_entryhi, false);
+                            if (fault >= 0) {
+                                c0_index = this.tlb_entry_most_recent << 8;
+                            } else {
+                                c0_index = 0x80000000;
+                            }
                         }
-                        if(rt != 0)
-                            this.regs[rt] = tmp0;
                         break;
-                    case 2: // CFCn
-                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                        this.isr(EX_RI, 0);
-                        return;
-                    case 4: // MTCn
-                        tmp0 = this.regs[rt];
-                        switch(rd) {
-                            case 0: // TLB index
-                                tmp1 = 0x00003F00;
-                                c0_index = (c0_index & ~tmp1) | (tmp0 & tmp1);
-                                break;
-                            case 2: // TLB entrylo (phys + flags)
-                                tmp1 = 0xFFFFFF00;
-                                c0_entrylo = (c0_entrylo & ~tmp1) | (tmp0 & tmp1);
-                                break;
-                            case 4: // Context + bad virtual address
-                                tmp1 = 0xFF800000;
-                                c0_context = (c0_context & ~tmp1) | (tmp0 & tmp1);
-                                break;
-                            case 10: // TLB entryhi (virt + ASID)
-                                tmp1 = 0xFFFFFFC0;
-                                c0_entryhi = (c0_entryhi & ~tmp1) | (tmp0 & tmp1);
-                                break;
-                            case 12: // Status
-                                tmp1 = 0x1040FF3F;
-                                c0_status = (c0_status & ~tmp1) | (tmp0 & tmp1);
-                                interrupt_ready = true;
-                                break;
 
-                            case 13: // Cause
-                                // You can write to the software interrupt bits.
-                                // This requests an interrupt.
-                                tmp1 = 0x00000300;
-                                c0_cause = (c0_cause & ~tmp1) | (tmp0 & tmp1);
-                                interrupt_ready = true;
-                                break;
+                        case 0x10: // RFE
+                            c0_status = (c0_status & ~0x0F) | ((c0_status >> 2) & 0x0F);
+                            interrupt_ready = true;
+                            break;
 
-                            case 14: // EPC
-                                // Apparently you can write anything to this
-                                c0_epc = tmp0;
-                                break;
+                        default:
+                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                            return;
 
-                            default:
-                                System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                                this.isr(EX_RI, 0);
-                                return;
-                        } break;
+                    }
+                    else switch (rs) {
+                        case 0: // MFCn
+                            switch (rd) {
+                                case 0: // TLB index
+                                    tmp0 = c0_index;
+                                    break;
+                                case 1: // TLB random index
+                                    tmp0 = ((int) (Math.random() * (64 - 8) + 8)) << 8;
+                                    break;
+                                case 2: // TLB entrylo (phys + flags)
+                                    tmp0 = c0_entrylo;
+                                    break;
+                                case 4: // Context + bad virtual address
+                                    tmp0 = c0_context;
+                                    break;
+                                case 8: // Bad virtual address
+                                    tmp0 = c0_vaddr;
+                                    break;
+                                case 10: // TLB entryhi (virt + ASID)
+                                    tmp0 = c0_entryhi;
+                                    break;
+                                case 12: // SR
+                                    tmp0 = c0_status;
+                                    break;
+                                case 13: // Cause
+                                    tmp0 = c0_cause;
+                                    break;
+                                case 14: // EPC
+                                    tmp0 = c0_epc;
+                                    break;
+                                case 15: // PRID
+                                    //tmp0 = 0x00000300;
+                                    tmp0 = 0x00000100; // pretend to be an R2000
+                                    break;
+                                default:
+                                    System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                                    this.isr(EX_RI, 0);
+                                    return;
+                            }
+                            if (rt != 0)
+                                this.regs[rt] = tmp0;
+                            break;
+                        case 2: // CFCn
+                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            this.isr(EX_RI, 0);
+                            return;
+                        case 4: // MTCn
+                            tmp0 = this.regs[rt];
+                            switch (rd) {
+                                case 0: // TLB index
+                                    tmp1 = 0x00003F00;
+                                    c0_index = (c0_index & ~tmp1) | (tmp0 & tmp1);
+                                    break;
+                                case 2: // TLB entrylo (phys + flags)
+                                    tmp1 = 0xFFFFFF00;
+                                    c0_entrylo = (c0_entrylo & ~tmp1) | (tmp0 & tmp1);
+                                    break;
+                                case 4: // Context + bad virtual address
+                                    tmp1 = 0xFF800000;
+                                    c0_context = (c0_context & ~tmp1) | (tmp0 & tmp1);
+                                    break;
+                                case 10: // TLB entryhi (virt + ASID)
+                                    tmp1 = 0xFFFFFFC0;
+                                    c0_entryhi = (c0_entryhi & ~tmp1) | (tmp0 & tmp1);
+                                    break;
+                                case 12: // Status
+                                    tmp1 = 0x3040FF3F;
+                                    c0_status = (c0_status & ~tmp1) | (tmp0 & tmp1);
+                                    interrupt_ready = true;
+                                    break;
 
-                    case 6: // CTCn
-                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                        this.isr(EX_RI, 0);
-                        return;
-                    default:
-                        System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                        this.isr(EX_RI, 0); // CU is only defined for EX_CpU
-                        return;
+                                case 13: // Cause
+                                    // You can write to the software interrupt bits.
+                                    // This requests an interrupt.
+                                    tmp1 = 0x00000300;
+                                    c0_cause = (c0_cause & ~tmp1) | (tmp0 & tmp1);
+                                    interrupt_ready = true;
+                                    break;
+
+                                case 14: // EPC
+                                    // Apparently you can write anything to this
+                                    c0_epc = tmp0;
+                                    break;
+
+                                default:
+                                    System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                                    this.isr(EX_RI, 0);
+                                    return;
+                            }
+                            break;
+
+                        case 6: // CTCn
+                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            this.isr(EX_RI, 0);
+                            return;
+                        default:
+                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                            return;
+                    }
+
+                } else if((otyp0&3) == 1) {
+                    // COP1
+                    // Check op type
+                    if (rs >= 16) switch (otyp1) {
+
+                        default:
+                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                            return;
+
+                    }
+
+                    else switch (rs) {
+                        case 0: // MFCn
+                            switch (rd) {
+                                case 123:
+                                    tmp0 = 0;
+                                    break;
+                                default:
+                                    System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                                    this.isr(EX_RI, 0);
+                                    return;
+                            }
+                            if (rt != 0)
+                                this.regs[rt] = tmp0;
+                            break;
+                        case 2: // CFCn
+                            switch (rd) {
+                                case 0: // FCR0
+                                    tmp0 = 0; // we have no FPU
+                                    break;
+                                default:
+                                    System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                                    this.isr(EX_RI, 0);
+                                    return;
+                            }
+                            if (rt != 0)
+                                this.regs[rt] = tmp0;
+                            break;
+                        case 4: // MTCn
+                            tmp0 = this.regs[rt];
+                            switch (rd) {
+                                case 123:
+                                    break;
+                                default:
+                                    System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                                    this.isr(EX_RI, 0);
+                                    return;
+                            }
+                            break;
+
+                        case 6: // CTCn
+                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            this.isr(EX_RI, 0);
+                            return;
+                        default:
+                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                            return;
+                    }
+
                 }
-
                 break;
 
             case 0x20: // LB
@@ -1585,6 +1695,22 @@ public class Jipsy {
 
         this.outbuf = "";
         int cyc_end = this.cycles + ccount - this.cycle_wait;
+
+        if(interrupt_timer_enabled) {
+            long tnew = System.currentTimeMillis();
+            if ((tnew - interrupt_timer_next) >= 0) {
+                c0_cause |= (1 << 10);
+
+                interrupt_timer_next += 1000 / 20;
+                interrupt_ready = true;
+                //System.out.printf("timer interrupt fired - status=%08X, cause=%08X\n", c0_status, c0_cause);
+
+                // don't buffer too many ticks
+                if ((tnew - interrupt_timer_next) >= 2000) {
+                    interrupt_timer_next = tnew + 1000 / 20;
+                }
+            }
+        }
 
         this.need_sleep = false;
         while(!this.hard_halted && !this.need_sleep && (cyc_end - this.cycles) >= 0)

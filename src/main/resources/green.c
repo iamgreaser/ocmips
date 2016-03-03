@@ -1,3 +1,5 @@
+// just in case whatever you're cross-compiling needs to run actual code
+#if !(defined(__i386) || defined(__x86_64))
 /*
 libgreen: simple userspace library for OCMIPS
 recommended to be paired up with newlib
@@ -87,7 +89,7 @@ int open(const char *pathname, int flags, ...)
 	int ret;
 
 	asm volatile (
-		"li $a0, 1\n"
+		"li $a0, 5\n"
 		"move $a1, %1\n"
 		"move $a2, %2\n"
 		"syscall\n"
@@ -270,6 +272,7 @@ void _start(void)
 {
 	asm volatile (
 		"lui $gp, %%hi(%0)\n"
+		//"ori $gp, $gp, %%lo(%0)\n"
 		"addiu $gp, $gp, %%lo(%0)\n"
 		:
 		: "i"(_gp)
@@ -285,4 +288,5 @@ void _start(void)
 	_exit(r);
 }
 
+#endif
 
