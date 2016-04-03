@@ -46,18 +46,17 @@ ssize_t write(int fd, const void *buf, size_t amt)
 {
 	ssize_t ret;
 
-	// i cannot be bothered making this use exact registers right now.
 	asm volatile (
-		"li $a0, 4\n"
-		"move $a1, %1\n"
-		"move $a2, %2\n"
-		"move $a3, %3\n"
+		"li $v0, 4004\n"
+		"move $a0, %1\n"
+		"move $a1, %2\n"
+		"move $a2, %3\n"
 		"syscall\n"
-		"move %0, $a3\n"
+		"move %0, $v0\n"
 		: "=r"(ret)
 		, "+r"(fd), "+r"(buf), "+r"(amt)
 		:
-		: "a0", "a1", "a2", "a3"
+		: "v0", "a0", "a1", "a2", "a3"
 	);
 
 	return ret;
@@ -66,12 +65,12 @@ ssize_t write(int fd, const void *buf, size_t amt)
 void _exit(int status)
 {
 	asm volatile (
-		"li $a0, 1\n"
-		"move $a1, %0\n"
+		"li $v0, 4001\n"
+		"move $a0, %0\n"
 		"syscall\n"
 		: "+r"(status)
 		:
-		: "a0", "a1", "a2", "a3"
+		: "v0", "a0", "a1", "a2", "a3"
 	);
 
 	for(;;) {}
@@ -89,15 +88,15 @@ int open(const char *pathname, int flags, ...)
 	int ret;
 
 	asm volatile (
-		"li $a0, 5\n"
-		"move $a1, %1\n"
-		"move $a2, %2\n"
+		"li $v0, 5\n"
+		"move $a0, %1\n"
+		"move $a1, %2\n"
 		"syscall\n"
-		"move %0, $a3\n"
+		"move %0, $v0\n"
 		: "=r"(ret)
 		, "+r"(pathname), "+r"(flags)
 		:
-		: "a0", "a1", "a2", "a3"
+		: "v0", "a0", "a1", "a2", "a3"
 	);
 
 	return ret;
@@ -115,16 +114,16 @@ ssize_t read(int fd, void *buf, size_t amt)
 	ssize_t ret;
 
 	asm volatile (
-		"li $a0, 3\n"
-		"move $a1, %1\n"
-		"move $a2, %2\n"
-		"move $a3, %3\n"
+		"li $v0, 4003\n"
+		"move $a0, %1\n"
+		"move $a1, %2\n"
+		"move $a2, %3\n"
 		"syscall\n"
-		"move %0, $a3\n"
+		"move %0, $v0\n"
 		: "=r"(ret)
 		, "+r"(fd), "+r"(buf), "+r"(amt)
 		:
-		: "a0", "a1", "a2", "a3"
+		: "v0", "a0", "a1", "a2", "a3"
 	);
 
 	return ret;
@@ -135,16 +134,16 @@ off_t lseek(int fd, off_t offset, int whence)
 	off_t ret;
 
 	asm volatile (
-		"li $a0, 19\n"
-		"move $a1, %1\n"
-		"move $a2, %2\n"
-		"move $a3, %3\n"
+		"li $a0, 4019\n"
+		"move $a0, %1\n"
+		"move $a1, %2\n"
+		"move $a2, %3\n"
 		"syscall\n"
-		"move %0, $a3\n"
+		"move %0, $v0\n"
 		: "=r"(ret)
 		, "+r"(fd), "+r"(offset), "+r"(whence)
 		:
-		: "a0", "a1", "a2", "a3"
+		: "v0", "a0", "a1", "a2", "a3"
 	);
 
 	return ret;
@@ -168,15 +167,15 @@ int gettimeofday(struct timeval *restrict tv, void *restrict tz)
 	int ret;
 
 	asm volatile (
-		"li $a0, 78\n"
-		"move $a1, %1\n"
-		"move $a2, %2\n"
+		"li $v0, 4078\n"
+		"move $a0, %1\n"
+		"move $a1, %2\n"
 		"syscall\n"
-		"move %0, $a3\n"
+		"move %0, $v0\n"
 		: "=r"(ret)
 		, "+r"(tv), "+r"(tz)
 		:
-		: "a0", "a1", "a2", "a3"
+		: "v0", "a0", "a1", "a2", "a3"
 	);
 
 	return ret;
@@ -213,14 +212,14 @@ int close(int fd)
 	int ret;
 
 	asm volatile (
-		"li $a0, 6\n"
-		"move $a1, %1\n"
+		"li $v0, 4006\n"
+		"move $a0, %1\n"
 		"syscall\n"
-		"move %0, $a3\n"
+		"move %0, $v0\n"
 		: "=r"(ret)
 		, "+r"(fd)
 		:
-		: "a0", "a1", "a2", "a3"
+		: "v0", "a0", "a1", "a2", "a3"
 	);
 
 	return ret;
@@ -271,9 +270,10 @@ extern int _gp[];
 void _start(void)
 {
 	asm volatile (
-		"lui $gp, %%hi(%0)\n"
+		//"lui $gp, %%hi(%0)\n"
 		//"ori $gp, $gp, %%lo(%0)\n"
-		"addiu $gp, $gp, %%lo(%0)\n"
+		//"addiu $gp, $gp, %%lo(%0)\n"
+		"la $gp, %0\n"
 		:
 		: "i"(_gp)
 		:

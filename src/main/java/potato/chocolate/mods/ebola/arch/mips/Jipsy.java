@@ -14,7 +14,7 @@ import java.util.Map;
  * Created by GreaseMonkey on 2/22/16.
  */
 public class Jipsy {
-    private String outbuf = "";
+    String outbuf = "";
 
     int[] ram;
     int[] regs;
@@ -23,9 +23,9 @@ public class Jipsy {
     int pc;
     int cycles;
     private int cycle_wait;
-    private int pf0;
-    private int pf0_pc;
-    private int op_pc;
+    int pf0;
+    int pf0_pc;
+    int op_pc;
     private int reset_pc = 0x00001000;
     boolean hard_halted = false;
     boolean need_sleep = false;
@@ -56,30 +56,14 @@ public class Jipsy {
 
     private PseudoVM vm;
     static final int OUTBUF_LEN = 1;
-    private boolean interrupt_ready;
-    private boolean interrupt_timer_enabled = false;
-    private long interrupt_timer_next = 0;
-
-    Map<AbstractValue, Integer> io_handlemap = new HashMap<AbstractValue, Integer>();
-    Map<Integer, AbstractValue> io_handlemap_rev = new HashMap<Integer, AbstractValue>();
-    int io_handlebeg = 3;
-    String[] cmp_list_addr;
-    String[] cmp_list_type;
-    String[] cmp_list_method;
-    byte[] cmp_buf_addr = new byte[64];
-    byte[] cmp_buf_type_method = new byte[64];
-    byte[] cmp_buf_error = new byte[64];
-    int cmp_method_ptr = 0;
-    int[][] cmp_arg_typ_list = new int[32][2];
+    boolean interrupt_ready;
+    boolean interrupt_timer_enabled = false;
+    long interrupt_timer_next = 0;
 
     // 0 = entrylo, 1 = entryhi, 2 = next in queue, 3 = previous in queue
     int[][] tlb_entries = new int [64][4];
     int tlb_entry_most_recent = 0;
 
-    int cmp_call_retcnt = 0;
-    byte[][] cmp_call_retarray = new byte[32][];
-    int cmp_call_retptr = 0;
-    int cmp_call_retlen = 0;
     private boolean double_fault_detect = false;
     private boolean pf0_double_fault_detect = false;
     private int pf0_fault = -1;
@@ -195,192 +179,36 @@ public class Jipsy {
         this.hard_halted = true;
     }
 
-    private void parse_retval(int i, Object retval) {
-        if(retval == null) {
-            this.cmp_arg_typ_list[i][1] = 0;
-            this.cmp_arg_typ_list[i][0] = 0;
-        } else if(retval instanceof Boolean) {
-            this.cmp_arg_typ_list[i][1] = 2;
-            this.cmp_arg_typ_list[i][0] = ((boolean)(Boolean)retval ? 1 : 0);
-        } else if(retval instanceof String) {
-            try {
-                cmp_call_retarray[i] = ((String)retval).getBytes("ISO-8859-1");
-                this.cmp_arg_typ_list[i][0] = cmp_call_retarray[i].length;
-                this.cmp_arg_typ_list[i][1] = 4;
-            } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
-                this.cmp_arg_typ_list[i][0] = 2;
-                this.cmp_arg_typ_list[i][1] = 0;
-            }
-        } else if(retval instanceof byte[]) {
-            this.cmp_arg_typ_list[i][1] = 4;
-            cmp_call_retarray[i] = ((byte[])retval);
-            this.cmp_arg_typ_list[i][0] = cmp_call_retarray[i].length;
-        } else if(retval instanceof Integer) {
-            this.cmp_arg_typ_list[i][1] = 6;
-            this.cmp_arg_typ_list[i][0] = (Integer)retval;
-        } else if(retval instanceof Long) {
-            // truncate it anyway
-            this.cmp_arg_typ_list[i][1] = 6;
-            this.cmp_arg_typ_list[i][0] = (int)(long)(Long)retval;
-        } else if(retval instanceof Float) {
-            this.cmp_arg_typ_list[i][1] = 8;
-            this.cmp_arg_typ_list[i][0] = Float.floatToIntBits((Float)retval);
-        } else if(retval instanceof Double) {
-            this.cmp_arg_typ_list[i][1] = 8;
-            this.cmp_arg_typ_list[i][0] = Float.floatToIntBits((float)(double)(Double)retval);
-        } else if(retval instanceof AbstractValue) {
-            this.cmp_arg_typ_list[i][1] = 10;
-            AbstractValue av = (AbstractValue)retval;
-            if(!io_handlemap.containsKey(av)) {
-                //System.out.printf("AbstractValue acquire handle %s %d\n", av.toString(),
-                //io_handlebeg);
-                io_handlemap.put(av, io_handlebeg);
-                io_handlemap_rev.put(io_handlebeg, av);
-                io_handlebeg++;
-            }
-            this.cmp_arg_typ_list[i][0] = io_handlemap.get(av);
-        } else {
-            System.err.printf("TODO: handle type: %s %s\n",
-                    retval.getClass().getTypeName(), retval.toString());
-            this.cmp_arg_typ_list[i][1] = 0;
-            this.cmp_arg_typ_list[i][0] = 1;
-        }
-    }
-
-    private int read_32_of(byte[] buf, int offs)
-    {
-        int v = 0;
-        if(offs+0 < buf.length) v |= (0xFF&(int)buf[offs+0])<<0;
-        if(offs+1 < buf.length) v |= (0xFF&(int)buf[offs+1])<<8;
-        if(offs+2 < buf.length) v |= (0xFF&(int)buf[offs+2])<<16;
-        if(offs+3 < buf.length) v |= (0xFF&(int)buf[offs+3])<<24;
-        return v;
-    }
-
-    private void write_32_of_masked(byte[] buf, int offs, int v, int mask)
-    {
-        if((mask&(0xFF<<0)) != 0 && offs+0 < buf.length) buf[offs+0] = (byte)(v>>0);
-        if((mask&(0xFF<<8)) != 0 && offs+1 < buf.length) buf[offs+1] = (byte)(v>>8);
-        if((mask&(0xFF<<16)) != 0 && offs+2 < buf.length) buf[offs+2] = (byte)(v>>16);
-        if((mask&(0xFF<<24)) != 0 && offs+3 < buf.length) buf[offs+3] = (byte)(v>>24);
-    }
-
-    private void write_32_of(byte[] buf, int offs, int v)
-    {
-        if(offs+0 < buf.length) buf[offs+0] = (byte)(v>>0);
-        if(offs+1 < buf.length) buf[offs+1] = (byte)(v>>8);
-        if(offs+2 < buf.length) buf[offs+2] = (byte)(v>>16);
-        if(offs+3 < buf.length) buf[offs+3] = (byte)(v>>24);
-    }
-
-    private void write_16_of(byte[] buf, int offs, short v)
-    {
-        if(offs+0 < buf.length) buf[offs+0] = (byte)(v>>0);
-        if(offs+1 < buf.length) buf[offs+1] = (byte)(v>>8);
-    }
-
-    // FIXME: unaligned accesses are as per the ARM7TDMI in the GBA
-    public int mem_read_32(int addr_)
+    public int mem_read_32_real(int addr_)
     {
         if(addr_ >= 0x1FF00000) {
-            if((addr_&~0x3F) == 0x1FF00200)
-                return read_32_of(this.cmp_buf_addr, addr_&0x3F);
-            if((addr_&~0x3F) == 0x1FF00240)
-                return read_32_of(this.cmp_buf_type_method, addr_&0x3F);
-            if((addr_&~0xFF) == 0x1FF00300)
-                return this.cmp_arg_typ_list[(addr_>>3)&31][(addr_>>2)&1];
-
-            switch (addr_ & 0xFFFFF) {
-                case 0x00004:
-                    //try
-                    //{
-                    // debug port input doesn't exist here
-                    // it might in future, but right now it does NOT.
-                    //return 0xFF&(int)'e';
-                    return -3;
-                //return System.in.read();
-                //} catch(IOException _e) {
-                //return -2;
-                //}
-
-                case 0x00020:
-                    // wall clock, microseconds
-                    return (int)(1000L*System.currentTimeMillis());
-                case 0x00024:
-                    // wall clock
-                    return (int)((1000L*System.currentTimeMillis())>>20);
-
-                case 0x00280:
-                    return this.cmp_method_ptr;
-                case 0x00284: {
-                    // component buffer reset strobe
-                    Map<String, String> m = vm.machine.components();
-                    int sz = m.size();
-                    cmp_list_addr = new String[sz];
-                    cmp_list_type = new String[sz];
-                    int i = 0;
-                    for (Map.Entry<String, String> n : m.entrySet()) {
-                        cmp_list_addr[i] = n.getKey();
-                        cmp_list_type[i] = n.getValue();
-                        i++;
-                    }
-                    return cmp_list_addr.length;
-                }
-
-                case 0x00286: {
-                    // method call argument count return
-                    return cmp_call_retcnt;
-                }
-
-                case 0x00287: {
-                    // event pull strobe
-                    Signal sig = vm.machine.popSignal();
-                    if(sig == null)
-                        return 0;
-
-                    System.out.printf("Event: (%s", sig.name());
-                    parse_retval(0, sig.name());
-                    Object[] retvals = sig.args();
-                    int retcount = Math.min(32, (retvals == null ? 0 : retvals.length)+1);
-                    for(int i = 1; i < retcount; i++)
-                    {
-                        System.out.printf(", %s", retvals[i-1].toString());
-                        parse_retval(i, retvals[i-1]);
-                    }
-                    System.out.printf(")\n");
-
-                    return retcount;
-                }
-
-                case 0x00288:
-                    return this.cmp_call_retptr;
-
-                case 0x0028C:
-                    return this.cmp_call_retlen;
-
-                default:
-                    return 0;
-            }
+            return vm.busReadMask32(addr_, 0xFFFFFFFF); // TODO proper mask
         }
 
-        int v = this.ram[addr_>>>2];
-        int b = (addr_ & 3);
-        if(b == 0) return v;
-        b <<= 3;
-        int v0 = (v>>>b);
-        int v1 = (v<<(32-b));
-        return v0|v1;
+        return this.ram[addr_>>>2];
+    }
+
+    public int mem_read_32(int addr_)
+    {
+        if((addr_&3) != 0) {
+            throw new RuntimeException("misaligned 32-bit read");
+        }
+
+        return mem_read_32_real(addr_);
     }
 
     public short mem_read_16(int addr_)
     {
-        return (short)mem_read_32(addr_);
+        if((addr_&1) != 0) {
+            throw new RuntimeException("misaligned 16-bit read");
+        }
+
+        return (short)(mem_read_32_real(addr_)>>((addr_&3)*8));
     }
 
     public byte mem_read_8(int addr_)
     {
-        return (byte)mem_read_32(addr_);
+        return (byte)(mem_read_32_real(addr_)>>((addr_&3)*8));
     }
 
     public String mem_read_cstr(int addr_)
@@ -409,29 +237,16 @@ public class Jipsy {
 
     public void mem_write_32_masked(int addr_, int data_, int mask_)
     {
-        if((addr_&3) != 0)
-        {
-            System.out.printf("PC ~ %08X\n", this.pc - 8);
-            throw new RuntimeException("misaligned 32-bit write");
-        }
-
+        //System.out.printf("write %08X %08X %08X\n", addr_, data_, mask_);
         if(addr_ >= 0x1FF00000) {
-            if ((addr_ & ~0x3F) == 0x1FF00200) {
-                if((addr_ & 0x3C) == 0x3C) mask_ &= 0x00FFFFFF;
-                write_32_of_masked(this.cmp_buf_addr, addr_ & 0x3F, data_, mask_);
-            } else if ((addr_ & ~0x3F) == 0x1FF00240) {
-                if((addr_ & 0x3C) == 0x3C) mask_ &= 0x00FFFFFF;
-                write_32_of_masked(this.cmp_buf_type_method, addr_ & 0x3F, data_, mask_);
-            } else {
-                System.out.printf("PC ~ %08X | %08X %08X %08X\n", this.pc - 8, addr_, data_, mask_);
-                throw new RuntimeException("unhandled masked I/O write");
-            }
-
+            vm.busWriteMask32(addr_, data_, mask_);
             return;
         }
 
         this.ram[addr_ >>> 2] &= ~mask_;
         this.ram[addr_ >>> 2] |= data_ & mask_;
+
+        // TODO: add to D-cache
     }
 
     public void mem_write_32(int addr_, int data_)
@@ -442,274 +257,21 @@ public class Jipsy {
             throw new RuntimeException("misaligned 32-bit write");
         }
 
-        if ((addr_ & ~0x3F) == 0x1FF00200 && ((addr_ & 0x3F) != 0x3F))
-            write_32_of(this.cmp_buf_addr, addr_ & 0x3F, data_);
-        if ((addr_ & ~0x3F) == 0x1FF00240 && ((addr_ & 0x3F) != 0x3F))
-            write_32_of(this.cmp_buf_type_method, addr_ & 0x3F, data_);
-
-        if(addr_ >= 0x1FF00000) {
-            if ((addr_ & ~0xFF) == 0x1FF00300)
-                this.cmp_arg_typ_list[(addr_ >> 3) & 31][(addr_ >> 2) & 1] = data_;
-
-            switch (addr_ & 0xFFFFF) {
-                case 0x00020:
-                    // sleep strobe
-                    // TODO: get correct sleep time
-                    this.need_sleep = true;
-                    return;
-
-                case 0x00280:
-                    this.cmp_method_ptr = data_;
-                    return;
-
-                case 0x00288:
-                    this.cmp_call_retptr = data_;
-                    return;
-
-                case 0x0028C:
-                    this.cmp_call_retlen = data_;
-                    return;
-
-                default:
-                    return;
-            }
-        }
-
-        this.ram[addr_ >>> 2] = data_;
+        mem_write_32_masked(addr_, data_, 0xFFFFFFFF);
     }
 
     public void mem_write_16(int addr_, short data_)
     {
-        if((addr_&1) != 0) throw new RuntimeException("misaligned 16-bit write");
-
-        if ((addr_ & ~0x3F) == 0x1FF00200 && ((addr_ & 0x3F) != 0x3F))
-            write_16_of(this.cmp_buf_addr, addr_ & 0x3F, data_);
-        if ((addr_ & ~0x3F) == 0x1FF00240 && ((addr_ & 0x3F) != 0x3F))
-            write_16_of(this.cmp_buf_type_method, addr_ & 0x3F, data_);
-
-        if(addr_ >= 0x1FF00000)
-            switch(addr_&0xFFFFF)
-            {
-                default:
-                    return;
-            }
-
-        int b = (addr_>>1) & 1;
-        int a = addr_ >>> 2;
-        switch(b)
-        {
-            case 0:
-                this.ram[a] = (this.ram[a] & 0xFFFF0000) | (((int)data_) & 0xFFFF);
-                break;
-            case 1:
-                this.ram[a] = (this.ram[a] & 0x0000FFFF) | (((int)data_) << 16);
-                break;
+        if((addr_&1) != 0) {
+            throw new RuntimeException("misaligned 16-bit write");
         }
+
+        mem_write_32_masked(addr_, (0xFFFF&(int)data_)*0x00010001, 0xFFFF<<((addr_&2)*8));
     }
 
     public void mem_write_8(int addr_, byte data_)
     {
-        if(addr_ >= 0x1FF00000) {
-            if ((addr_ & ~0x3F) == 0x1FF00200 && ((addr_ & 0x3F) != 0x3F))
-                this.cmp_buf_addr[addr_ & 0x3F] = data_;
-            if ((addr_ & ~0x3F) == 0x1FF00240 && ((addr_ & 0x3F) != 0x3F))
-                this.cmp_buf_type_method[addr_ & 0x3F] = data_;
-
-            switch (addr_ & 0xFFFFF) {
-                case 0x00004:
-                    //System.out.printf("%c", data_);
-                    this.outbuf += (char) data_;
-                    if (this.outbuf.length() >= OUTBUF_LEN) {
-                        // debug output disabled for now.
-                        // might be useful for the analyser, though!
-                        //System.out.print(this.outbuf);
-                        this.outbuf = "";
-                    }
-                    return;
-
-                case 0x00024:
-                    c0_cause &= ~(1<<10);
-                    long tnew = System.currentTimeMillis();
-                    if ((tnew - interrupt_timer_next) >= 0) {
-                        c0_cause |= (1 << 10);
-
-                        interrupt_ready = true;
-                        interrupt_timer_next += 1000 / 20;
-                        //System.out.printf("timer interrupt refired - status=%08X, cause=%08X\n", c0_status, c0_cause);
-
-                        // don't buffer too many ticks
-                        if ((tnew - interrupt_timer_next) >= 2000) {
-                            interrupt_timer_next = tnew + 1000 / 20;
-                        }
-                    }
-                    return;
-
-                case 0x00025:
-                    if(data_ == 0) {
-                        interrupt_timer_enabled = false;
-                        c0_cause &= ~(1<<10);
-                        //System.out.printf("timer interrupt stopped - status=%08X, cause=%08X\n", c0_status, c0_cause);
-                    } else if(data_ == 1) {
-                        interrupt_timer_enabled = true;
-                        interrupt_timer_next = System.currentTimeMillis() + 1000 / 20;
-                        //System.out.printf("timer interrupt started - status=%08X, cause=%08X\n", c0_status, c0_cause);
-                    }
-                    return;
-
-                case 0x00284: {
-                    // component search strobe
-
-                    // ensure valid
-                    if (cmp_list_addr == null || data_ < 0 || data_ >= cmp_list_addr.length) {
-                        // it isn't
-                        cmp_buf_addr[0] = 0;
-                        cmp_buf_type_method[0] = 0;
-                        return;
-                    }
-
-                    try {
-                        byte[] b;
-                        b = cmp_list_addr[data_].getBytes("ISO-8859-1");
-                        System.arraycopy(b, 0, cmp_buf_addr, 0, Math.min(63, b.length));
-                        cmp_buf_addr[Math.min(63, b.length)] = 0;
-                        b = cmp_list_type[data_].getBytes("ISO-8859-1");
-                        System.arraycopy(b, 0, cmp_buf_type_method, 0, Math.min(63, b.length));
-                        cmp_buf_type_method[Math.min(63, b.length)] = 0;
-                        cmp_buf_addr[63] = 0;
-                        cmp_buf_type_method[63] = 0;
-                    } catch (UnsupportedEncodingException e) {
-                        throw new RuntimeException(e);
-                    }
-
-                    return;
-                }
-
-                case 0x00286: {
-                    // method call strobe
-                    String address = new String(this.cmp_buf_addr);
-                    if(address.indexOf('\u0000') >= 0)
-                        address = address.substring(0, address.indexOf('\u0000'));
-                    String method_name = mem_read_cstr(this.cmp_method_ptr & 0x1FFFFFFF);
-                    //System.out.printf("Calling %s method %s...\n", address, method_name);
-                    int arg_count = Math.min(32, data_);
-                    Object[] args = new Object[arg_count];
-
-                    for(int i = 0; i < arg_count; i++) {
-                        switch(cmp_arg_typ_list[i][1]) {
-                            case 0: // nil
-                                args[i] = null;
-                                break;
-                            case 2: // boolean
-                                args[i] = (cmp_arg_typ_list[i][0] != 0);
-                                break;
-                            case 4: // string
-                                args[i] = mem_read_cstr(this.cmp_arg_typ_list[i][0] & 0x1FFFFFFF);
-                                break;
-                            case 6: // int
-                                args[i] = this.cmp_arg_typ_list[i][0];
-                                break;
-                            case 8: // float
-                                args[i] = Float.intBitsToFloat(this.cmp_arg_typ_list[i][0]);
-                                break;
-                            case 10: // AbstractValue
-                                if (io_handlemap_rev.containsKey((Integer)this.cmp_arg_typ_list[i][0])) {
-                                    AbstractValue av = io_handlemap_rev.get((Integer) this.cmp_arg_typ_list[i][0]);
-                                    args[i] = av;
-                                    //System.out.printf("AbstractValue supply handle %s %d\n", av.toString(),
-                                            //(Integer)this.cmp_arg_typ_list[i][0]);
-                                } else {
-                                    args[i] = null;
-                                }
-                                break;
-                            default:
-                                args[i] = null;
-                                break;
-                        }
-                    }
-
-                    // call method
-
-                    // get return count back
-                    try {
-                        Object[] rets;
-                        try {
-                            rets = vm.machine.invoke(address, method_name, args);
-                        } catch(LimitReachedException e) {
-                            // jump back to here
-                            // FIXME: BLATANT HACK
-                            //System.err.printf("%08X: limit reached: %s -> %s.\n", this.op_pc, address, method_name);
-                            this.pc = this.op_pc;
-                            this.pf0_pc = this.pc;
-                            this.pf0 = 0x00000000; // NOP
-                            this.need_sleep = true;
-                            this.sync_call = true;
-                            return;
-                        }
-                        //System.err.printf("%08X: call succeeded: %s -> %s.\n", this.op_pc, address, method_name);
-
-                        this.cmp_call_retcnt = (rets == null ? 0 : rets.length);
-                        for (int i = 0; i < this.cmp_call_retcnt; i++) {
-                            parse_retval(i, rets[i]);
-                        }
-                    } catch(Exception e) {
-                        //System.err.printf("%08X: call failed: %s.\n", this.op_pc, e.getMessage());
-                        //System.err.printf("exception!\n");
-                        //e.printStackTrace();
-                        String err = e.getMessage();
-                        if(err == null) err = e.toString();
-                        if(err == null) err = "(null?)";
-                        byte[] b = err.getBytes();
-                        System.arraycopy(b, 0, this.cmp_buf_error, 0, Math.min(63, b.length));
-                        this.cmp_buf_error[Math.min(63, b.length)] = 0;
-                        this.cmp_buf_error[63] = 0;
-                        this.cmp_call_retcnt = -1;
-                    }
-
-                    // Sleep if that was a sync call
-                    if(this.sync_call) {
-                        this.need_sleep = true;
-                        this.sync_call = false;
-                    }
-                    return;
-                }
-
-                case 0x00287: {
-                    // fetch string strobe
-
-                    // ignore if invalid
-                    if(data_ < 0 || data_ >= this.cmp_call_retcnt
-                            || this.cmp_call_retarray[data_] == null)
-                        return;
-
-                    for(int i = 0; i < Math.min(this.cmp_call_retlen,
-                            this.cmp_call_retarray[data_].length); i++)
-                    {
-                        // lop off top few bits for convenience
-
-                        // stop if we aren't even in memory
-                        if(((this.cmp_call_retptr+i) & 0x1FFFFFFF) >= this.ram_bytes)
-                            break;
-
-                        // write
-                        this.mem_write_8((this.cmp_call_retptr+i) & 0x1FFFFFFF, this.cmp_call_retarray[data_][i]);
-                        this.cycles += 1;
-                    }
-
-                    return;
-                }
-
-                default:
-                    return;
-            }
-        }
-
-        int b = addr_ & 3;
-        int a = addr_ >>> 2;
-        b <<= 3;
-        int v = ((int)data_) & 0xFF;
-        int m = 0xFF << b;
-
-        this.ram[a] = (this.ram[a] & ~m) | (v << b);
+        mem_write_32_masked(addr_, (0xFF&(int)data_)*0x01010101, 0xFF<<((addr_&3)*8));
     }
 
     protected void swi(int op_pc, int op)
@@ -1591,6 +1153,7 @@ public class Jipsy {
             case 0x2B: // SW
                 tmp0 = this.regs[rs] + (int)(short)op;
                 tmp1 = this.remap_address(tmp0, true);
+                //System.out.printf("reg %2d %08X %08X -> %08X -> %08X\n", rs, op, this.regs[rs], tmp0, tmp1);
                 if(tmp1 >= 0 && (tmp1&3) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
                 if(tmp1 < 0) {
                     int fault = -tmp1-1;
