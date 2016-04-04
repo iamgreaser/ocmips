@@ -1,20 +1,21 @@
 package potato.chocolate.mods.ebola.arch.mips;
 
-import li.cil.oc.api.machine.LimitReachedException;
-import li.cil.oc.api.machine.Signal;
-import li.cil.oc.api.prefab.AbstractValue;
-
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.UnsupportedEncodingException;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Arrays;
 
 /**
  * Created by GreaseMonkey on 2/22/16.
  */
 public class Jipsy {
     String outbuf = "";
+
+    // tag notes:
+    // upper 18/20 bits: phys addr upper bits
+    // bottom bit: isvalid
+    int[] icache_data = new int[16<<(10-2)]; // 16KB
+    int[] icache_tag = new int[4<<(10-2)];
+    int[] dcache_data = new int[4<<(10-2)]; // 4KB
+    int[] dcache_tag = new int[4<<(10-2)];
 
     int[] ram;
     int[] regs;
@@ -141,8 +142,16 @@ public class Jipsy {
         this.hard_halted = false;
         this.pc = this.reset_pc;
 
+        // TODO: make this do less, then make the bootloader do more.
+
         // reset TLB
         this.reset_tlb();
+
+        // clear cache
+        Arrays.fill(this.icache_data, 0);
+        Arrays.fill(this.icache_tag, 0);
+        Arrays.fill(this.dcache_data, 0);
+        Arrays.fill(this.dcache_tag, 0);
 
         // reset COP0 and whatnot
         this.c0_index = 0x00000000;
@@ -165,7 +174,7 @@ public class Jipsy {
     public Jipsy(PseudoVM vm, int ram_bytes_)
     {
         assert(ram_bytes_ >= 4);
-        assert(ram_bytes_ <= (64<<20)); // cap at... is 64MB enough?
+        assert(ram_bytes_ <= (256<<20)); // cap at... is 256MB enough?
 
         // pad to 4-byte boundary
         ram_bytes_ = (ram_bytes_+3)&~3;
@@ -179,36 +188,94 @@ public class Jipsy {
         this.hard_halted = true;
     }
 
+    private boolean mem_does_use_cache(int vaddr_)
+    {
+        if((vaddr_&0xE0000000) == 0xA0000000) {
+            return false;
+        }
+
+        if((vaddr_&0xE0000000) == 0x80000000) {
+            return true;
+        }
+
+        if((this.tlb_entries[this.tlb_entry_most_recent][0] & 0x800) != 0) {
+            return false;
+        }
+
+        return true;
+    }
+
     public int mem_read_32_real(int addr_)
     {
         if(addr_ >= 0x1FF00000) {
             return vm.busReadMask32(addr_, 0xFFFFFFFF); // TODO proper mask
+        } else {
+            return this.ram[addr_ >>> 2];
         }
-
-        return this.ram[addr_>>>2];
     }
 
-    public int mem_read_32(int addr_)
+    public int mem_read_32_dcached(int paddr_, int vaddr_)
     {
-        if((addr_&3) != 0) {
+        int ret;
+
+        if((c0_status & (1<<16)) != 0) { // IsC - Isolate Cache
+            c0_status &= ~(1<<19); // CM - Cache Miss (IDT docs state the opposite of what Linux expects)
+
+            if((c0_status & (1<<17)) != 0) { // SwC - Swap Caches
+                // read from icache
+                ret = this.icache_data[(paddr_>>2)&0xFFF];
+                if(((this.icache_tag[(paddr_>>4)&0x3FF]^(paddr_|1))&~0x3FFE) != 0) {
+                    c0_status |= (1<<19);
+                }
+            } else {
+                // read from dcache
+                ret = this.dcache_data[(paddr_>>2)&0x3FF];
+                if(((this.dcache_tag[(paddr_>>2)&0x3FF]^(paddr_|1))&~0xFFE) != 0) {
+                    c0_status |= (1<<19);
+                }
+            }
+
+            return ret;
+        }
+
+        boolean use_cache = mem_does_use_cache(vaddr_);
+
+        if(use_cache) {
+            if (((this.dcache_tag[(paddr_ >> 2) & 0x3FF] ^ (paddr_|1)) & ~0xFFE) == 0) {
+                // we're all good
+                return this.dcache_data[(paddr_ >> 2) & 0x3FF];
+            }
+
+            ret = mem_read_32_real(paddr_);
+            this.dcache_data[(paddr_>>2)&0x3FF] = ret;
+            this.dcache_tag[(paddr_>>2)&0x3FF] = (paddr_&~0xFFF)|1;
+            return ret;
+        } else {
+            return mem_read_32_real(paddr_);
+        }
+    }
+
+    public int mem_read_32(int paddr_, int vaddr_)
+    {
+        if((paddr_&3) != 0) {
             throw new RuntimeException("misaligned 32-bit read");
         }
 
-        return mem_read_32_real(addr_);
+        return mem_read_32_dcached(paddr_, vaddr_);
     }
 
-    public short mem_read_16(int addr_)
+    public short mem_read_16(int paddr_, int vaddr_)
     {
-        if((addr_&1) != 0) {
+        if((paddr_&1) != 0) {
             throw new RuntimeException("misaligned 16-bit read");
         }
 
-        return (short)(mem_read_32_real(addr_)>>((addr_&3)*8));
+        return (short)(mem_read_32_dcached(paddr_, vaddr_)>>((paddr_&3)*8));
     }
 
-    public byte mem_read_8(int addr_)
+    public byte mem_read_8(int paddr_, int vaddr_)
     {
-        return (byte)(mem_read_32_real(addr_)>>((addr_&3)*8));
+        return (byte)(mem_read_32_dcached(paddr_, vaddr_)>>((paddr_&3)*8));
     }
 
     public String mem_read_cstr(int addr_)
@@ -220,10 +287,11 @@ public class Jipsy {
         while(len < 65536)
         {
             // stop if we aren't even in memory
-            if(((addr_ + len) & 0x1FFFFFFF) >= this.ram_bytes)
+            int iaddr = (addr_ + len) & 0x1FFFFFFF;
+            if(iaddr >= this.ram_bytes)
                 break;
 
-            byte b = mem_read_8((addr_ + len) & 0x1FFFFFFF);
+            byte b = mem_read_8(iaddr, iaddr | 0xA0000000);
             this.cycles += 1;
             if(b == 0) break;
             bfp.write(0xFF&(int)b);
@@ -235,48 +303,147 @@ public class Jipsy {
         return bfp.toString();
     }
 
-    public void mem_write_32_masked(int addr_, int data_, int mask_)
+    private int mem_icache_fetch(int addr_)
     {
-        //System.out.printf("write %08X %08X %08X\n", addr_, data_, mask_);
-        if(addr_ >= 0x1FF00000) {
-            vm.busWriteMask32(addr_, data_, mask_);
+        if((c0_status & (1<<17)) != 0) {
+            // i really don't want to have to do this but i may need to
+
+            //System.out.printf("SwC ifetch dcache %08X\n", addr_);
+
+            int tidx = (addr_>>2)&0x3FF;
+            int didx = (addr_>>2)&0x3FF;
+
+            if(((this.dcache_tag[tidx]^(addr_|1)) & ~0xFFE) != 0) {
+                // tag mismatch, load new stuff
+                this.dcache_tag[tidx] = (addr_ & ~0xFFF);
+                this.dcache_data[didx] = this.mem_read_32_real(addr_&~3);
+                this.cycles++;
+                //System.out.printf("cache miss, load %08X\n", this.dcache_data[didx]);
+                this.dcache_tag[tidx] |= 1;
+            }
+
+            return this.dcache_data[didx];
+        }
+
+        int tidx = (addr_>>4)&0x3FF;
+        int didx = (addr_>>2)&0xFFF;
+
+        if(((this.icache_tag[tidx]^(addr_|1)) & ~0x3FFE) != 0) {
+            // tag mismatch, load new stuff
+            this.icache_tag[tidx] = (addr_ & ~0x3FFF);
+
+            for(int i = 0; i < 4; i++) {
+                this.icache_data[(tidx<<2)+i] = this.mem_read_32_real((addr_&~0xF) + (i<<2));
+                this.cycles++;
+            }
+
+            this.icache_tag[tidx] |= 1;
+        }
+
+        return this.icache_data[didx];
+    }
+
+    public void mem_write_32_masked_real(int paddr_, int vaddr_, int data_, int mask_)
+    {
+        //System.out.printf("write %08X %08X %08X\n", paddr_, data_, mask_);
+        if(paddr_ >= 0x1FF00000) {
+            vm.busWriteMask32(paddr_, data_, mask_);
             return;
         }
 
-        this.ram[addr_ >>> 2] &= ~mask_;
-        this.ram[addr_ >>> 2] |= data_ & mask_;
-
-        // TODO: add to D-cache
+        this.ram[paddr_ >>> 2] &= ~mask_;
+        this.ram[paddr_ >>> 2] |= data_ & mask_;
     }
 
-    public void mem_write_32(int addr_, int data_)
+    public void mem_write_32_masked(int paddr_, int vaddr_, int data_, int mask_)
     {
-        if((addr_&3) != 0)
-        {
-            System.out.printf("PC ~ %08X\n", this.pc - 8);
+        if(false) {
+            mem_write_32_masked_real(paddr_, vaddr_, data_, mask_);
+            return;
+        }
+
+        if((c0_status & (1<<16)) != 0) { // IsC - Isolate Cache
+            if((c0_status & (1<<17)) != 0) { // SwC - Swap Caches
+                // write to icache
+                if(mask_ == -1) {
+                    // set tag directly
+                    this.icache_tag[(paddr_>>4)&0x3FF] = (paddr_ & ~0x3FFF) | 1;
+                    this.icache_data[(paddr_>>2)&0xFFF] = data_;
+
+                } else {
+                    // invalidate line
+                    this.icache_tag[(paddr_>>4)&0x3FF] &= ~1;
+                    //this.icache_data[(paddr_>>2)&0xFFF] &= ~mask_;
+                    //this.icache_data[(paddr_>>2)&0xFFF] |= data_ & mask_;
+                }
+
+
+            } else {
+                // write to dcache
+                if(mask_ == -1) {
+                    // set tag directly
+                    this.dcache_tag[(paddr_>>2)&0x3FF] = (paddr_ & ~0xFFF) | 1;
+                    this.dcache_data[(paddr_>>2)&0x3FF] = data_;
+
+                } else {
+                    // invalidate line
+                    this.dcache_tag[(paddr_>>2)&0x3FF] &= ~1;
+                    //this.dcache_data[(paddr_>>2)&0x3FF] &= ~mask_;
+                    //this.dcache_data[(paddr_>>2)&0x3FF] |= data_ & mask_;
+                }
+
+            }
+
+            return;
+        }
+
+        // FIXME: support uncacheable bit of TLB
+        boolean use_cache = mem_does_use_cache(vaddr_);
+
+        // TODO: deal with SwC=1 IsC=0 somehow? I'm not sure what to do here.
+        // We can either emulate it plausibly, outright ignore it, or error.
+        if(use_cache) {
+            // check if we can put this into the cache
+            if(mask_ == -1) {
+                // add to cache
+                this.dcache_data[(paddr_>>2)&0x3FF] = data_;
+                this.dcache_tag[(paddr_>>2)&0x3FF] = (paddr_ & ~0xFFF) | 1;
+
+            } else if(((this.dcache_tag[(paddr_>>2)&0x3FF]^(paddr_|1)) & ~0xFFE) == 0) {
+                // already in cache, mask in the new stuff
+                this.dcache_data[(paddr_>>2)&0x3FF] &= ~mask_;
+                this.dcache_data[(paddr_>>2)&0x3FF] |= data_ & mask_;
+            }
+
+            // if neither pass, the cache is unaffected
+        }
+
+        // it's a write-through cache, so we write it
+        // TODO: 4-stage write buffer
+        mem_write_32_masked_real(paddr_, vaddr_, data_, mask_);
+    }
+
+    public void mem_write_32(int paddr_, int vaddr_, int data_)
+    {
+        if((paddr_&3) != 0) {
             throw new RuntimeException("misaligned 32-bit write");
         }
 
-        mem_write_32_masked(addr_, data_, 0xFFFFFFFF);
+        mem_write_32_masked(paddr_, vaddr_, data_, 0xFFFFFFFF);
     }
 
-    public void mem_write_16(int addr_, short data_)
+    public void mem_write_16(int paddr_, int vaddr_, short data_)
     {
-        if((addr_&1) != 0) {
+        if((paddr_&1) != 0) {
             throw new RuntimeException("misaligned 16-bit write");
         }
 
-        mem_write_32_masked(addr_, (0xFFFF&(int)data_)*0x00010001, 0xFFFF<<((addr_&2)*8));
+        mem_write_32_masked(paddr_, vaddr_, (0xFFFF&(int)data_)*0x00010001, 0xFFFF<<((paddr_&2)*8));
     }
 
-    public void mem_write_8(int addr_, byte data_)
+    public void mem_write_8(int paddr_, int vaddr_, byte data_)
     {
-        mem_write_32_masked(addr_, (0xFF&(int)data_)*0x01010101, 0xFF<<((addr_&3)*8));
-    }
-
-    protected void swi(int op_pc, int op)
-    {
-        // TODO!
+        mem_write_32_masked(paddr_, vaddr_, (0xFF&(int)data_)*0x01010101, 0xFF<<((paddr_&3)*8));
     }
 
     private int remap_tlb(int addr_, boolean is_write)
@@ -483,7 +650,18 @@ public class Jipsy {
             // but thankfully that's not actually possible.
 
             // Fetch
-            int new_op = this.mem_read_32(phys_pc);
+            if((phys_pc&3) != 0)
+            {
+                System.out.printf("PC ~ %08X p=%08X\n", this.pc, phys_pc);
+                throw new RuntimeException("misaligned 32-bit ifetch");
+            }
+
+            // WARNING: the last call to remap_address() must be for this.pc,
+            // otherwise the cache check will fail!
+            int new_op = (mem_does_use_cache(this.pc)
+                ? this.mem_icache_fetch(phys_pc)
+                : this.mem_read_32_real(phys_pc));
+
             this.pf0 = new_op;
             this.pf0_pc = this.pc;
             this.pc += 4;
@@ -925,8 +1103,7 @@ public class Jipsy {
                                     tmp0 = c0_epc;
                                     break;
                                 case 15: // PRID
-                                    //tmp0 = 0x00000300;
-                                    tmp0 = 0x00000100; // pretend to be an R2000
+                                    tmp0 = 0x00000200; // R3000 works fine... apparently 3 == R6000?!
                                     break;
                                 default:
                                     System.out.printf("%08X: %08X %02X\n", pc, op, rs);
@@ -960,8 +1137,11 @@ public class Jipsy {
                                     c0_entryhi = (c0_entryhi & ~tmp1) | (tmp0 & tmp1);
                                     break;
                                 case 12: // Status
-                                    tmp1 = 0x3040FF3F;
+                                    tmp1 = 0x3043FF3F;
                                     c0_status = (c0_status & ~tmp1) | (tmp0 & tmp1);
+                                    if((c0_status & (3<<16)) == (2<<16)) {
+                                        throw new RuntimeException("SwC without IsC is not supported");
+                                    }
                                     interrupt_ready = true;
                                     break;
 
@@ -1067,7 +1247,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = (int)this.mem_read_8(tmp1);
+                tmp0 = (int)this.mem_read_8(tmp1, tmp0);
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
@@ -1080,7 +1260,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = (int)this.mem_read_16(tmp1);
+                tmp0 = (int)this.mem_read_16(tmp1, tmp0);
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
@@ -1093,7 +1273,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = this.mem_read_32(tmp1);
+                tmp0 = this.mem_read_32(tmp1, tmp0);
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
@@ -1105,7 +1285,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = 0xFF&((int)(this.mem_read_8(tmp1)));
+                tmp0 = 0xFF&((int)(this.mem_read_8(tmp1, tmp0)));
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
@@ -1118,7 +1298,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = 0xFFFF&((int)(this.mem_read_16(tmp1)));
+                tmp0 = 0xFFFF&((int)(this.mem_read_16(tmp1, tmp0)));
                 if(rt != 0) this.regs[rt] = tmp0;
                 this.cycles += 1;
                 break;
@@ -1133,7 +1313,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                this.mem_write_8(tmp1, (byte)this.regs[rt]);
+                this.mem_write_8(tmp1, tmp0, (byte)this.regs[rt]);
                 this.cycles += 1;
                 break;
             case 0x29: // SH
@@ -1147,7 +1327,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                this.mem_write_16(tmp1, (short)this.regs[rt]);
+                this.mem_write_16(tmp1, tmp0, (short)this.regs[rt]);
                 this.cycles += 1;
                 break;
             case 0x2B: // SW
@@ -1162,7 +1342,7 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                this.mem_write_32(tmp1, this.regs[rt]);
+                this.mem_write_32(tmp1, tmp0, this.regs[rt]);
                 this.cycles += 1;
                 break;
 
@@ -1174,13 +1354,14 @@ public class Jipsy {
             //
             // TODO: abuse pipeline bypass
             case 0x22: // LWL
-                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, false);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
                 if(tmp1 < 0) {
                     int fault = -tmp1-1;
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = this.mem_read_32(tmp1&~3);
+                tmp0 = this.mem_read_32(tmp1&~3, tmp0&~3);
                 tmp1 ^= 3;
                 this.cycles += 1;
                 if(rt != 0) this.regs[rt] = (this.regs[rt] & ~(0xFFFFFFFF<<((tmp1&3)<<3)))
@@ -1188,13 +1369,14 @@ public class Jipsy {
                 //System.out.printf("LWL %08X %d\n", this.regs[rt], tmp1&3);
                 break;
             case 0x26: // LWR
-                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, false);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
                 if(tmp1 < 0) {
                     int fault = -tmp1-1;
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = this.mem_read_32(tmp1&~3);
+                tmp0 = this.mem_read_32(tmp1&~3, tmp0&~3);
                 this.cycles += 1;
                 if(rt != 0) this.regs[rt] = (this.regs[rt] & ~(0xFFFFFFFF>>>((tmp1&3)<<3))
                     | (tmp0>>>((tmp1&3)<<3)));
@@ -1212,7 +1394,8 @@ public class Jipsy {
             // the other 24bit of Rt and [mem] will remain intact.
             // ^ this is the not so critical point as it's almost obvious
             case 0x2A: // SWL
-                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, true);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, true);
                 if(tmp1 < 0) {
                     int fault = -tmp1-1;
                     if(fault == EX_TLBL) fault = EX_TLBS;
@@ -1220,15 +1403,15 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = this.regs[rt];
                 tmp1 ^= 3;
                 //System.out.printf("SWL %d\n", tmp1&3);
-                this.mem_write_32_masked(tmp1&~3, tmp0>>>((tmp1&3)<<3),
+                this.mem_write_32_masked(tmp1&~3, tmp0&~3, (this.regs[rt])>>>((tmp1&3)<<3),
                     0xFFFFFFFF>>>((tmp1&3)<<3));
                 this.cycles += 1;
                 break;
             case 0x2E: // SWR
-                tmp1 = this.remap_address(this.regs[rs] + (int)(short)op, true);
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, true);
                 if(tmp1 < 0) {
                     int fault = -tmp1-1;
                     if(fault == EX_TLBL) fault = EX_TLBS;
@@ -1236,9 +1419,8 @@ public class Jipsy {
                     this.isr(fault, 0);
                     return;
                 }
-                tmp0 = this.regs[rt];
                 //System.out.printf("SWR %d\n", tmp1&3);
-                this.mem_write_32_masked(tmp1&~3, tmp0<<((tmp1&3)<<3),
+                this.mem_write_32_masked(tmp1&~3, tmp0&~3, this.regs[rt]<<((tmp1&3)<<3),
                     0xFFFFFFFF<<((tmp1&3)<<3));
                 this.cycles += 1;
                 break;

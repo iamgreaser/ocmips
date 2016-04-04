@@ -396,7 +396,7 @@ public class PseudoVM {
                         break;
 
                     // write
-                    mips.mem_write_8((this.cmp_call_retptr+i) & 0x1FFFFFFF, this.cmp_call_retarray[data8][i]);
+                    mips.mem_write_8((this.cmp_call_retptr+i) & 0x1FFFFFFF, 0xA0000000, this.cmp_call_retarray[data8][i]);
                     mips.cycles += 1;
                 }
 
@@ -501,19 +501,19 @@ public class PseudoVM {
                     byte[] eeprom_data = (byte[])eeDataO[0];
                     try {
                         for(int i = 0; i < eeprom_data.length; i++) {
-                            mips.mem_write_8(0x00001000+i, eeprom_data[i]);
+                            mips.mem_write_8(0x00001000+i, 0xA0000000, eeprom_data[i]);
                         }
 
                         // set up jump vector
-                        mips.mem_write_32(0x00000000, 0x3C1AA000); // LUI k0,     0xA000
-                        mips.mem_write_32(0x00000004, 0x375A1000); // ORI k0, k0, 0x1000
-                        mips.mem_write_32(0x00000008, 0x03400008); // JR  k0
-                        mips.mem_write_32(0x0000000C, 0x00000000); // NOP
+                        mips.mem_write_32(0x00000000, 0xA0000000, 0x3C1AA000); // LUI k0,     0xA000
+                        mips.mem_write_32(0x00000004, 0xA0000000, 0x375A1000); // ORI k0, k0, 0x1000
+                        mips.mem_write_32(0x00000008, 0xA0000000, 0x03400008); // JR  k0
+                        mips.mem_write_32(0x0000000C, 0xA0000000, 0x00000000); // NOP
 
                         // set up invalid ops so we can double-fault and BSOD on exception
-                        mips.mem_write_32(0x00000080, 0xFFFFFFFF);
-                        mips.mem_write_32(0x00000100, 0xFFFFFFFF);
-                        mips.mem_write_32(0x00000180, 0xFFFFFFFF);
+                        mips.mem_write_32(0x00000080, 0xA0000000, 0xFFFFFFFF);
+                        mips.mem_write_32(0x00000100, 0xA0000000, 0xFFFFFFFF);
+                        mips.mem_write_32(0x00000180, 0xA0000000, 0xFFFFFFFF);
 
                         // reset so our first op can be prefetched
                         mips.set_sp(0xA0003F00); // kinda important!
@@ -540,6 +540,8 @@ public class PseudoVM {
         }
 
         // Run some cycles
+        if(mode == 1) { mode = 2; } // TEST
+
         try {
             if(mode == 1) return (Integer)0;
 
