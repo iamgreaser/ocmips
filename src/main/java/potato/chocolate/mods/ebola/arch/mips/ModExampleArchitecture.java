@@ -1,8 +1,9 @@
 package potato.chocolate.mods.ebola.arch.mips;
 
-import cpw.mods.fml.common.Mod;
-import cpw.mods.fml.common.event.FMLInitializationEvent;
-import cpw.mods.fml.common.event.FMLPreInitializationEvent;
+import net.minecraft.item.EnumDyeColor;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.common.event.FMLInitializationEvent;
+import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import li.cil.oc.api.fs.FileSystem;
 
 import java.io.IOException;
@@ -45,7 +46,7 @@ public class ModExampleArchitecture {
             e.printStackTrace();
         }
 
-        li.cil.oc.api.Items.registerFloppy("MLua53", 0, new Callable<FileSystem>() {
+        li.cil.oc.api.Items.registerFloppy("MLua53", EnumDyeColor.BLACK, new Callable<FileSystem>() {
             @Override
             public FileSystem call() throws Exception {
                 return li.cil.oc.api.FileSystem.fromClass(this.getClass(),

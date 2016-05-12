@@ -8,7 +8,7 @@
   "authorList": ["GreaseMonkey", "gamax92", "Sangar"],
   "credits" : "Inspired by a couple of other mods, most notably ComputerCraft.",
   "logoFile" : "assets/opencomputers/textures/gui/logo.png",
-  "requiredMods": [ "Forge@[10.13.4.1448,)" ],
+  "requiredMods": [ "Forge@[12.16.0.1776,)" ],
   "dependencies": [
     "OpenComputers"
   ],
