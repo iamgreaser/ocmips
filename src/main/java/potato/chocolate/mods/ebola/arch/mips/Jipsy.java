@@ -1,6 +1,7 @@
 package potato.chocolate.mods.ebola.arch.mips;
 
 import java.io.ByteArrayOutputStream;
+import java.io.UnsupportedEncodingException;
 import java.util.Arrays;
 
 /**
@@ -19,6 +20,7 @@ public class Jipsy {
 
     int[] ram;
     int[] regs;
+    int[] fpregs;
     int rlo, rhi;
     int ram_bytes;
     int pc;
@@ -54,6 +56,8 @@ public class Jipsy {
     int c0_status; // 12
     int c0_cause; // 13
     int c0_epc; // 14
+
+    int c1_status; // 31
 
     private PseudoVM vm;
     static final int OUTBUF_LEN = 1;
@@ -166,6 +170,9 @@ public class Jipsy {
         this.pf0_double_fault_detect = false;
         this.bd_detect = -1;
 
+        // reset COP1
+        this.c1_status = 0x00000000;
+
         // clear prefetch buffer
         this.pf0_pc = this.pc;
         this.pf0 = 0x00000000; // NOP
@@ -183,6 +190,7 @@ public class Jipsy {
         this.ram_bytes = ram_bytes_;
         this.ram = new int[ram_bytes_>>2];
         this.regs = new int[32];
+        this.fpregs = new int[32];
         this.cycles = 0;
         this.cycle_wait = 0;
         this.hard_halted = true;
@@ -300,7 +308,37 @@ public class Jipsy {
 
         //return bfp.toString("UTF-8");
         //return bfp.toString("ISO-8859-1");
-        return bfp.toString();
+        try {
+            //return bfp.toString("ISO-8859-1");
+            return bfp.toString("UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
+    }
+
+    public byte[] mem_read_pstr_bytes(int addr_, int slen_)
+    {
+        ByteArrayOutputStream bfp = new ByteArrayOutputStream();
+
+        // cap it here
+        int len = 0;
+        while(len < 65536)
+        {
+            // stop if we aren't even in memory
+            int iaddr = (addr_ + len) & 0x1FFFFFFF;
+            if(iaddr >= this.ram_bytes)
+                break;
+
+            if(len >= slen_) break;
+            byte b = mem_read_8(iaddr, iaddr | 0xA0000000);
+            this.cycles += 1;
+            bfp.write(0xFF&(int)b);
+            len++;
+        }
+
+        //return bfp.toString("UTF-8");
+        return bfp.toByteArray();
     }
 
     private int mem_icache_fetch(int addr_)
@@ -1178,10 +1216,197 @@ public class Jipsy {
                 } else if((otyp0&3) == 1) {
                     // COP1
                     // Check op type
-                    if (rs >= 16) switch (otyp1) {
+                    int fs2 = rt;
+                    int fs1 = rd;
+                    int fd = sh;
+                    if (rs >= 16) switch (rs) {
+
+                        // TODO: make stuff fall back to sw emu
+                        // TODO: work out what to do when odd regs are used
+                        case 16: // SP
+                        {
+                            float vs1 = Float.intBitsToFloat(this.fpregs[fs1]);
+                            float vs2 = Float.intBitsToFloat(this.fpregs[fs2]);
+                            float vd = 0.0f;
+                            switch (otyp1) {
+                                case 0: // ADD
+                                    vd = vs1 + vs2;
+                                    break;
+                                case 1: // SUB
+                                    vd = vs1 - vs2;
+                                    break;
+                                case 2: // MUL
+                                    vd = vs1 * vs2;
+                                    break;
+                                case 3: // DIV
+                                    vd = vs1 / vs2;
+                                    break;
+                                case 5: // ABS
+                                    vd = Math.abs(vs1);
+                                    break;
+                                case 6: // MOV
+                                    vd = vs1;
+                                    break;
+                                case 7: // NEG
+                                    vd = -vs1;
+                                    break;
+
+                                case 33: {
+                                    // CVT from S to D
+                                    float cfrom = vs1;
+                                    double cto = (double)cfrom;
+                                    long vdi = Double.doubleToLongBits(cto);
+                                    fd &= ~1;
+                                    this.fpregs[fd+0] = (int)(vdi);
+                                    this.fpregs[fd+1] = (int)(vdi>>>32);
+                                    fd = -1;
+                                } break;
+                                case 36: {
+                                    // CVT from S to W
+                                    float cfrom = vs1;
+                                    int cto = (int)cfrom;
+                                    this.fpregs[fd] = cto;
+                                    fd = -1;
+                                } break;
+
+                                default:
+                                    if(otyp1 >= 48 && otyp1 <= 63) {
+                                        // TODO: trap on trapping compares
+                                        boolean cond = false;
+                                        if((otyp1 & 4) != 0 && vs1 < vs2) { cond = true; }
+                                        if((otyp1 & 2) != 0 && vs1 == vs2) { cond = true; }
+                                        if((otyp1 & 1) != 0 && (vs1 < vs2) == (vs1 > vs2)) { cond = true; }
+                                        if(cond) {
+                                            this.c1_status |= (1<<23);
+                                        } else {
+                                            this.c1_status &= ~(1<<23);
+                                        }
+                                        fd = -1;
+                                        break;
+                                    }
+                                    // TODO: use IRQ3 trap
+                                    System.out.printf("%08X: %08X %02X (S FP)\n", pc, op, rs);
+                                    this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                                    return;
+
+                            }
+
+                            if (fd != -1) {
+                                this.fpregs[fd] = Float.floatToIntBits(vd);
+                            }
+                        } break;
+                        case 17: // DP
+                        {
+                            fs1 &= ~1; fs2 &= ~1; fd &= ~1;
+                            double vs1 = Double.longBitsToDouble(
+                                (((long)this.fpregs[fs1+0])&0xFFFFFFFFL)
+                                |((((long)this.fpregs[fs1+1])&0xFFFFFFFFL)<<32L)
+                            );
+                            double vs2 = Double.longBitsToDouble(
+                                (((long)this.fpregs[fs2+0])&0xFFFFFFFFL)
+                                |((((long)this.fpregs[fs2+1])&0xFFFFFFFFL)<<32L)
+                            );
+                            //System.out.printf("op %f %f\n", vs1, vs2);
+                            double vd = 0.0f;
+                            switch(otyp1) {
+                                case 0: // ADD
+                                    vd = vs1 + vs2;
+                                    break;
+                                case 1: // SUB
+                                    vd = vs1 - vs2;
+                                    break;
+                                case 2: // MUL
+                                    vd = vs1 * vs2;
+                                    break;
+                                case 3: // DIV
+                                    vd = vs1 / vs2;
+                                    break;
+                                case 5: // ABS
+                                    vd = Math.abs(vs1);
+                                    break;
+                                case 6: // MOV
+                                    vd = vs1;
+                                    break;
+                                case 7: // NEG
+                                    vd = -vs1;
+                                    break;
+
+                                case 32: {
+                                    // CVT from D to S
+                                    double cfrom = vs1;
+                                    float cto = (float)cfrom;
+                                    this.fpregs[fd] = Float.floatToIntBits(cto);
+                                    fd = -1;
+                                } break;
+                                case 36: {
+                                    // CVT from D to W
+                                    double cfrom = vs1;
+                                    int cto = (int)cfrom;
+                                    this.fpregs[fd] = cto;
+                                    fd = -1;
+                                } break;
+
+                                default:
+                                    if(otyp1 >= 48 && otyp1 <= 63) {
+                                        // TODO: trap on trapping compares
+                                        boolean cond = false;
+                                        if((otyp1 & 4) != 0 && vs1 < vs2) { cond = true; }
+                                        if((otyp1 & 2) != 0 && vs1 == vs2) { cond = true; }
+                                        if((otyp1 & 1) != 0 && (vs1 < vs2) == (vs1 > vs2)) { cond = true; }
+                                        if(cond) {
+                                            this.c1_status |= (1<<23);
+                                        } else {
+                                            this.c1_status &= ~(1<<23);
+                                        }
+                                        fd = -1;
+                                        break;
+                                    }
+                                    // TODO: use IRQ3 trap
+                                    System.out.printf("%08X: %08X %02X (D FP)\n", pc, op, rs);
+                                    this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                                    return;
+
+                            }
+
+                            if (fd != -1) {
+                                long vdi = Double.doubleToLongBits(vd);
+                                this.fpregs[fd+0] = (int)(vdi);
+                                this.fpregs[fd+1] = (int)(vdi>>>32);
+                            }
+                        } break;
+
+                        case 20: // W
+                            switch(otyp1) {
+                                case 32: {
+                                    // CVT from W to S
+                                    int cfrom = this.fpregs[fs1];
+                                    float cto = (float)cfrom;
+                                    this.fpregs[fd] = Float.floatToIntBits(cto);
+                                    fd = -1;
+                                } break;
+                                case 33: {
+                                    // CVT from W to D
+                                    int cfrom = this.fpregs[fs1];
+                                    double cto = (double)cfrom;
+                                    long vdi = Double.doubleToLongBits(cto);
+                                    fd &= ~1;
+                                    this.fpregs[fd+0] = (int)(vdi);
+                                    this.fpregs[fd+1] = (int)(vdi>>>32);
+                                    fd = -1;
+                                } break;
+
+                                default:
+                                    // TODO: use IRQ3 trap
+                                    System.out.printf("%08X: %08X %02X (W FP)\n", pc, op, rs);
+                                    this.isr(EX_RI, 0); // CU is only defined for EX_CpU
+                                    return;
+
+                            }
+                            break;
 
                         default:
-                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
+                            // TODO: use IRQ3 trap
+                            System.out.printf("%08X: %08X %02X (FP type)\n", pc, op, rs);
                             this.isr(EX_RI, 0); // CU is only defined for EX_CpU
                             return;
 
@@ -1189,22 +1414,17 @@ public class Jipsy {
 
                     else switch (rs) {
                         case 0: // MFCn
-                            switch (rd) {
-                                case 123:
-                                    tmp0 = 0;
-                                    break;
-                                default:
-                                    System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                                    this.isr(EX_RI, 0);
-                                    return;
-                            }
+                            tmp0 = this.fpregs[rd];
                             if (rt != 0)
                                 this.regs[rt] = tmp0;
                             break;
                         case 2: // CFCn
                             switch (rd) {
-                                case 0: // FCR0
-                                    tmp0 = 0; // we have no FPU
+                                case 0: // FCR0: Revision
+                                    tmp0 = 0x0300;
+                                    break;
+                                case 31: // FCR31: Status
+                                    tmp0 = this.c1_status;
                                     break;
                                 default:
                                     System.out.printf("%08X: %08X %02X\n", pc, op, rs);
@@ -1216,20 +1436,26 @@ public class Jipsy {
                             break;
                         case 4: // MTCn
                             tmp0 = this.regs[rt];
-                            switch (rd) {
-                                case 123:
-                                    break;
-                                default:
-                                    System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                                    this.isr(EX_RI, 0);
-                                    return;
-                            }
+                            this.fpregs[rd] = tmp0;
                             break;
 
                         case 6: // CTCn
-                            System.out.printf("%08X: %08X %02X\n", pc, op, rs);
-                            this.isr(EX_RI, 0);
-                            return;
+                            switch (rd) {
+                                case 31: // FCR31: Status
+                                    // TODO emulate properly
+                                    this.c1_status = this.regs[rt];
+                                    break;
+                                default:
+                                    System.out.printf("%08X: %08X %02X (CTC1)\n", pc, op, rs);
+                                    this.isr(EX_RI, 0);
+                                    return;
+                            } break;
+                        case 8: // BCnb
+                            if(((this.c1_status>>23)&1) == (rt&1)) {
+                                this.pc = pc + 4 + (((int)(short)op)<<2);
+                                this.bd_detect = this.op_pc+4;
+                            }
+                            break;
                         default:
                             System.out.printf("%08X: %08X %02X\n", pc, op, rs);
                             this.isr(EX_RI, 0); // CU is only defined for EX_CpU
@@ -1343,6 +1569,36 @@ public class Jipsy {
                     return;
                 }
                 this.mem_write_32(tmp1, tmp0, this.regs[rt]);
+                this.cycles += 1;
+                break;
+
+            case 0x31: // LWC1
+                // TODO: work out what kind of fault *actually* happens
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, false);
+                if(tmp1 >= 0 && (tmp1&3) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    this.isr(fault, 0);
+                    return;
+                }
+                tmp0 = this.mem_read_32(tmp1, tmp0);
+                this.fpregs[rt] = tmp0;
+                this.cycles += 1;
+                break;
+            case 0x39: // SWC1
+                tmp0 = this.regs[rs] + (int)(short)op;
+                tmp1 = this.remap_address(tmp0, true);
+                //System.out.printf("reg %2d %08X %08X -> %08X -> %08X\n", rs, op, this.regs[rs], tmp0, tmp1);
+                if(tmp1 >= 0 && (tmp1&3) != 0) { tmp1=-1-EX_AdEL; c0_vaddr = tmp0; }
+                if(tmp1 < 0) {
+                    int fault = -tmp1-1;
+                    if(fault == EX_TLBL) fault = EX_TLBS;
+                    if(fault == EX_AdEL) fault = EX_AdES;
+                    this.isr(fault, 0);
+                    return;
+                }
+                this.mem_write_32(tmp1, tmp0, this.fpregs[rt]);
                 this.cycles += 1;
                 break;
 

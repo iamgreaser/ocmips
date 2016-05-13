@@ -100,11 +100,14 @@ Fetching a string argument:
 Types:
 - 0 = nil
 - 2 = boolean
-- 4 = string (value contains string length)
+- 4 = string (value contains string length on read, when writing use this for ASCIIZ strings)
 - 6 = integer
 - 8 = single-precision float
 - 10 = AbstractValue (e.g. file handles)
+- 0x01xxxxxx = string of length xxxxxx (max 16MB-1B, only used for writing)
 reason for this arrangement is so the low bit could be used to store a double
+
+note: strings are currently capped at 64KB, please don't exceed this (at least for now)
 
 COP0 is implemented as per this document (mostly):
 http://mescal.imag.fr/membres/vania.marangozova-martin/TEACHING/NACHOS/NACHOS_DOC/mips.html

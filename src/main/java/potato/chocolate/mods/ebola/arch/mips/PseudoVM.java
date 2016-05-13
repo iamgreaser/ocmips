@@ -305,7 +305,7 @@ public class PseudoVM {
                         case 2: // boolean
                             args[i] = (cmp_arg_typ_list[i][0] != 0);
                             break;
-                        case 4: // string
+                        case 4: // string, ASCIIZ
                             args[i] = mips.mem_read_cstr(this.cmp_arg_typ_list[i][0] & 0x1FFFFFFF);
                             break;
                         case 6: // int
@@ -325,7 +325,15 @@ public class PseudoVM {
                             }
                             break;
                         default:
-                            args[i] = null;
+                            {
+                                int typ = cmp_arg_typ_list[i][1];
+                                if ((typ & 0xFF000000) == 0x01000000) {
+                                    // string, explicit length
+                                    args[i] = mips.mem_read_pstr_bytes(this.cmp_arg_typ_list[i][0] & 0x1FFFFFFF, typ&0xFFFFFF);
+                                } else {
+                                    args[i] = null;
+                                }
+                            }
                             break;
                     }
                 }
